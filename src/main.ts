@@ -449,8 +449,10 @@ export default {
       const ta = document.createElement("textarea");
       ta.placeholder = "메시지… (Enter 전송, Shift+Enter 줄바꿈) — 언제나 참견 가능";
       ta.rows = 1;
+      ta.dataset.node = "input"; // 노출: 메시지 입력(contributes.nodes)
       const send = document.createElement("button");
       send.textContent = "전송";
+      send.dataset.node = "send"; // 노출: 전송 버튼
       inrow.append(ta, send);
 
       const st: StudioState = {
@@ -515,6 +517,7 @@ export default {
       st.roster.forEach((entry, idx) => {
         const a = AGENTS.find((x) => x.id === entry.id);
         const chip = el("div", "st-tab" + (entry.checked ? "" : " off"));
+        chip.dataset.node = `tab/${entry.id}`; // 노출: 에이전트 탭(체크/드래그)
         chip.style.color = a?.color ?? "#888";
         chip.draggable = true;
         const chk = el("span", "chk");

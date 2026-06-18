@@ -69,6 +69,11 @@
       { "name": "clubhouse.feed", "title": "Clubhouse 피드 읽기" },
       { "name": "clubhouse.clear", "title": "Clubhouse 피드 비우기" }
     ],
+    "nodes": [
+      { "id": "send", "description": "전송 버튼" },
+      { "id": "input", "description": "메시지 입력" },
+      { "id": "tab", "description": "에이전트 탭(체크·드래그)" }
+    ],
     "programs": [
       {
         "id": "acp-studio",

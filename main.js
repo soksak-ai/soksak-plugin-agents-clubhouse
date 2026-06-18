@@ -601,8 +601,10 @@ var main_default = {
       const ta = document.createElement("textarea");
       ta.placeholder = "\uBA54\uC2DC\uC9C0\u2026 (Enter \uC804\uC1A1, Shift+Enter \uC904\uBC14\uAFC8) \u2014 \uC5B8\uC81C\uB098 \uCC38\uACAC \uAC00\uB2A5";
       ta.rows = 1;
+      ta.dataset.node = "input";
       const send = document.createElement("button");
       send.textContent = "\uC804\uC1A1";
+      send.dataset.node = "send";
       inrow.append(ta, send);
       const st = {
         roster: AGENTS.map((a) => ({ id: a.id, checked: true })),
@@ -660,6 +662,7 @@ var main_default = {
       st.roster.forEach((entry, idx) => {
         const a = AGENTS.find((x) => x.id === entry.id);
         const chip = el("div", "st-tab" + (entry.checked ? "" : " off"));
+        chip.dataset.node = `tab/${entry.id}`;
         chip.style.color = a?.color ?? "#888";
         chip.draggable = true;
         const chk = el("span", "chk");
