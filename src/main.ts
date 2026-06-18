@@ -65,7 +65,9 @@ const CSS = `
 .st-in textarea{flex:1;resize:none;background:rgba(127,127,127,.1);color:inherit;border:1px solid rgba(127,127,127,.25);border-radius:7px;padding:7px 9px;font:inherit;min-height:20px;max-height:120px}
 .st-in button{background:#2d6cdf;color:#fff;border:0;border-radius:7px;padding:0 14px;cursor:pointer;font:inherit;font-weight:600}
 .club{display:flex;flex-direction:column;height:100%;width:100%;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
-.club-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto}
+/* 좌측 사이드바 타이틀바 — 높이는 테마 표준 var(--header-h)를 준수(컨텐츠 탭행과 같은 줄·높이).
+   하드코딩 금지: 테마마다 값이 다를 수 있다. 패딩 상하 0(높이는 변수가 소유), 좌우만. */
+.club-head{display:flex;align-items:center;gap:8px;height:var(--header-h,33px);box-sizing:border-box;padding:0 12px;border-bottom:1px solid var(--bd,rgba(127,127,127,.2));flex:0 0 auto}
 .club-feed{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
 .club-empty{color:var(--fg3,#888);font-size:12px;line-height:1.5;margin:auto;max-width:30em;text-align:center}
 .club-post{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border-radius:10px;background:rgba(127,127,127,.08)}

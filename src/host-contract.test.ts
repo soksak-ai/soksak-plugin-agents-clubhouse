@@ -12,8 +12,8 @@ import { describe, expect, it } from "vitest";
 
 const src = readFileSync(join(process.cwd(), "src", "main.ts"), "utf8");
 
-// 호스트가 단독 소유하는 크롬 셀렉터/변수 — 플러그인이 height/배치로 덮으면 줄 정렬이 깨진다.
-const FORBIDDEN = [
+// 호스트가 단독 소유하는 크롬 셀렉터 — 플러그인이 자기 CSS 로 덮으면 줄 정렬이 깨진다(금지).
+const HOST_SELECTORS = [
   ".left-host-tabs",
   ".left-host-tab",
   ".content-tabs",
@@ -23,6 +23,12 @@ const FORBIDDEN = [
   ".plugin-side-head",
   ".tabs",
   ".titlebar",
+];
+
+// 테마가 소유하는 표준 높이 변수. 플러그인이 이 값을 **정의/대입**하면 표준을 덮는 것(금지). 하지만 자기
+// 요소 높이를 표준에 맞추려고 var() 로 **사용**하는 건 준수(권장) — 좌측 사이드바 타이틀바는 var(--header-h)
+// 를 써서 컨텐츠 탭행과 같은 줄·높이가 돼야 한다. 그래서 정의만 막고 사용은 허용한다.
+const HOST_VARS = [
   "--chrome-row-h",
   "--header-h",
   "--status-h",
@@ -42,10 +48,19 @@ function cssBlocks(): string {
 }
 
 describe("호스트 크롬 표준 준수 (사이드바 플러그인 계약)", () => {
-  it("번들 CSS 가 호스트 크롬 셀렉터/변수를 언급하지 않는다(높이·배치 비간섭)", () => {
+  it("번들 CSS 가 호스트 소유 셀렉터를 덮지 않는다", () => {
     const css = cssBlocks();
-    const hits = FORBIDDEN.filter((sel) => css.includes(sel));
+    const hits = HOST_SELECTORS.filter((sel) => css.includes(sel));
     expect(hits).toEqual([]);
+  });
+
+  it("표준 변수를 정의/대입하지 않는다(사용 var() 은 허용 — 준수)", () => {
+    const css = cssBlocks();
+    // 정의/대입: `--header-h:` (콜론). 사용: `var(--header-h)` (괄호) — 후자는 통과해야 한다.
+    const defined = HOST_VARS.filter((v) =>
+      new RegExp(`${v}\\s*:`).test(css.replace(new RegExp(`var\\(\\s*${v}\\b`, "g"), "")),
+    );
+    expect(defined).toEqual([]);
   });
 
   it("플러그인 스타일은 자기 네임스페이스(club-/st-/acpc-)로 한정된다", () => {

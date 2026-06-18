@@ -293,7 +293,9 @@ var CSS = `
 .st-in textarea{flex:1;resize:none;background:rgba(127,127,127,.1);color:inherit;border:1px solid rgba(127,127,127,.25);border-radius:7px;padding:7px 9px;font:inherit;min-height:20px;max-height:120px}
 .st-in button{background:#2d6cdf;color:#fff;border:0;border-radius:7px;padding:0 14px;cursor:pointer;font:inherit;font-weight:600}
 .club{display:flex;flex-direction:column;height:100%;width:100%;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
-.club-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto}
+/* \uC88C\uCE21 \uC0AC\uC774\uB4DC\uBC14 \uD0C0\uC774\uD2C0\uBC14 \u2014 \uB192\uC774\uB294 \uD14C\uB9C8 \uD45C\uC900 var(--header-h)\uB97C \uC900\uC218(\uCEE8\uD150\uCE20 \uD0ED\uD589\uACFC \uAC19\uC740 \uC904\xB7\uB192\uC774).
+   \uD558\uB4DC\uCF54\uB529 \uAE08\uC9C0: \uD14C\uB9C8\uB9C8\uB2E4 \uAC12\uC774 \uB2E4\uB97C \uC218 \uC788\uB2E4. \uD328\uB529 \uC0C1\uD558 0(\uB192\uC774\uB294 \uBCC0\uC218\uAC00 \uC18C\uC720), \uC88C\uC6B0\uB9CC. */
+.club-head{display:flex;align-items:center;gap:8px;height:var(--header-h,33px);box-sizing:border-box;padding:0 12px;border-bottom:1px solid var(--bd,rgba(127,127,127,.2));flex:0 0 auto}
 .club-feed{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
 .club-empty{color:var(--fg3,#888);font-size:12px;line-height:1.5;margin:auto;max-width:30em;text-align:center}
 .club-post{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border-radius:10px;background:rgba(127,127,127,.08)}
