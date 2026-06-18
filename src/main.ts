@@ -19,7 +19,6 @@ import {
   buildSummonPrompt,
   createTagDemux,
   demux,
-  detectSummon,
   inviteePreamble,
   relaySummons,
   type ClubPost,
@@ -34,7 +33,6 @@ const AGENTS: { id: string; label: string; color: string }[] = [
 const NAME: Record<string, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 const COLOR: Record<string, string> = Object.fromEntries(AGENTS.map((a) => [a.id, a.color]));
 const nameOf = (id: string): string => NAME[id] ?? id;
-const CHANNEL_EMOJI: Record<string, string> = { 회고: "🪞", 잡담: "💬" };
 const FREE_ROUNDS = 2; // free(자유) 모드 라운드 안전판(폭주 방지) — P5 설정화.
 
 const CSS = `
@@ -66,18 +64,16 @@ const CSS = `
 .st-in{display:flex;gap:8px;padding:8px 10px;border-top:1px solid rgba(127,127,127,.2);flex:0 0 auto}
 .st-in textarea{flex:1;resize:none;background:rgba(127,127,127,.1);color:inherit;border:1px solid rgba(127,127,127,.25);border-radius:7px;padding:7px 9px;font:inherit;min-height:20px;max-height:120px}
 .st-in button{background:#2d6cdf;color:#fff;border:0;border-radius:7px;padding:0 14px;cursor:pointer;font:inherit;font-weight:600}
-.club2{display:flex;flex-direction:column;height:100%;width:100%;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
-.club2-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto}
-.club2-feed{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
-.club2-empty{color:var(--fg3,#888);font-size:12px;line-height:1.5;margin:auto;max-width:30em;text-align:center}
-.club2-post{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border-radius:10px;background:rgba(127,127,127,.08)}
-.club2-h{display:flex;align-items:center;gap:6px;font-size:11px}
-.club2-av{font-size:14px}
-.club2-who{font-weight:700}
-.club2-ch{font-size:9.5px;padding:1px 6px;border-radius:8px;background:rgba(127,127,127,.18)}
-.club2-ch.회고{color:#a9b665}.club2-ch.잡담{color:#7daea3}
-.club2-summon{font-size:10px;color:#d8a657;font-weight:600}
-.club2-body{white-space:pre-wrap;word-break:break-word;line-height:1.45}
+.club{display:flex;flex-direction:column;height:100%;width:100%;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
+.club-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto}
+.club-feed{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.club-empty{color:var(--fg3,#888);font-size:12px;line-height:1.5;margin:auto;max-width:30em;text-align:center}
+.club-post{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border-radius:10px;background:rgba(127,127,127,.08)}
+.club-h{display:flex;align-items:center;gap:6px;font-size:11px}
+.club-av{font-size:14px}
+.club-who{font-weight:700}
+.club-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.club-body{white-space:pre-wrap;word-break:break-word;line-height:1.45}
 `;
 
 interface Current {
@@ -356,39 +352,26 @@ export default {
         async mount(container: HTMLElement) {
           const style = document.createElement("style");
           style.textContent = CSS;
-          const root = el("div", "club2");
-          const head = el("div", "club2-head");
-          head.append(elText("span", "🛋️", "club2-av"), elText("b", "Clubhouse"));
-          const feedEl = el("div", "club2-feed");
-          const empty = elText(
-            "div",
-            "아직 잡담이 없습니다. Studio 에서 에이전트들이 일하면, 그들이 남긴 회고·잡담·호명이 여기 쌓입니다.",
-            "club2-empty",
-          );
+          const root = el("div", "club");
+          const head = el("div", "club-head");
+          head.append(elText("span", "🛋️", "club-av"), elText("b", "Clubhouse"));
+          const feedEl = el("div", "club-feed");
+          const empty = elText("div", "대화가 없습니다.", "club-empty");
           feedEl.appendChild(empty);
           root.append(head, feedEl);
           container.replaceChildren(style, root);
 
+          // 채팅처럼 — 누가 무슨 말을 했는지만. 회고/잡담/호명 같은 내부 용어는 노출하지 않는다(사용자 지칭어 아님).
           const renderPost = (p: ClubPost) => {
             empty.remove();
-            const row = el("div", "club2-post");
-            const h = el("div", "club2-h");
-            const who = elText("span", nameOf(p.who), "club2-who");
+            const row = el("div", "club-post");
+            const h = el("div", "club-h");
+            const dot = el("span", "club-dot");
+            dot.style.background = COLOR[p.who] ?? "var(--fg3,#888)";
+            const who = elText("span", nameOf(p.who), "club-who");
             who.style.color = COLOR[p.who] ?? "var(--fg,#ddd)";
-            h.append(
-              elText("span", CHANNEL_EMOJI[p.channel] ?? "💬", "club2-av"),
-              who,
-              elText("span", p.channel, `club2-ch ${p.channel}`),
-            );
-            // 호명 화살표 — 이 발화가 동료를 부르면 "→ 이름"(물고 물리는 연쇄 시각화).
-            const summoned = detectSummon(
-              p.text,
-              AGENTS.map((a) => a.id),
-              p.who,
-              nameOf,
-            );
-            if (summoned) h.append(elText("span", `→ ${nameOf(summoned)}`, "club2-summon"));
-            row.append(h, elText("div", p.text, "club2-body"));
+            h.append(dot, who);
+            row.append(h, elText("div", p.text, "club-body"));
             feedEl.appendChild(row);
             feedEl.scrollTop = feedEl.scrollHeight;
           };
