@@ -902,15 +902,19 @@ var main_default = {
         }
         if (!targets.length && st.mode !== "facil") {
           await resolveMentions(st, scanFrom);
-          if (st.pendingHuman.length) {
-            injectPending(st);
-            continue;
-          }
+        }
+        if (st.pendingHuman.length) {
+          injectPending(st);
+          continue;
         }
         break;
       }
-      st.running = false;
       st.actives.clear();
+      if (st.pendingHuman.length) {
+        injectPending(st);
+        return runLoop(st);
+      }
+      st.running = false;
       setStatus(st, "\uB300\uAE30");
     }
     function onStream(cur, evt) {

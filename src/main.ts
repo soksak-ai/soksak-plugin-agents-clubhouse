@@ -870,21 +870,29 @@ export default {
           await driveSequential(st, ids);
         }
         if (st.pendingHuman.length) {
-          injectPending(st); // 참견 — 부분응답 종결 뒤 사람 입력 주입(순서: 발화 → 사람)
+          injectPending(st); // 참견(cut) — 부분응답 종결 뒤 사람 입력 주입(순서: 발화 → 사람)
           continue; // 재구동
         }
         // @지목 직행·진행 모드는 @연쇄 안 함(직행 답 / 진행자 조율). 그 외(순차·동시)만 @멘션 해소.
         if (!targets.length && st.mode !== "facil") {
           await resolveMentions(st, scanFrom);
-          if (st.pendingHuman.length) {
-            injectPending(st);
-            continue;
-          }
+        }
+        // 최종 가드 — 드라이브·@해소 동안(또는 직후) 들어온 wait 입력을 종료 전에 반드시 처리(주입·재구동).
+        // 이게 없으면 wait 큐가 'running=false, pending=1' 로 영영 멈춘다(흐름 끝나면 주입 약속 위반).
+        if (st.pendingHuman.length) {
+          injectPending(st);
+          continue;
         }
         break; // 참견 없음 — 종료
       }
-      st.running = false;
       st.actives.clear();
+      // 종료 직전 레이스 가드 — running 을 내리기 직전 들어온 wait 입력이 있으면 루프 재진입(고아 방지).
+      // running=true 인 동안 들어온 입력은 onHuman 이 큐에만 넣으므로, 여기서 마지막으로 흡수한다.
+      if (st.pendingHuman.length) {
+        injectPending(st);
+        return runLoop(st); // 꼬리재귀 — running 유지한 채 재구동
+      }
+      st.running = false;
       setStatus(st, "대기");
     }
 
