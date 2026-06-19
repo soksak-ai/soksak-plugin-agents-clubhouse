@@ -1,18 +1,18 @@
 // conversation — Studio 대화 순수 로직(앱/DOM 비의존 — vitest 단위검증 대상).
-// 참여자(탭 순서)·참견 모드별 다음 발화자·canonical 턴 프롬프트·한 교환(exchange) 실행.
+// 참여자(탭 순서)·순차 발화자·canonical 프롬프트·교환 실행·페르소나·진행자 함수.
 // 실 연결/세션은 주입된 turn() 뒤로 숨긴다 — 실행 로직을 실 에이전트·인증 없이 결정적으로 검증.
 //
-// 모델(사용자 확정):
-//  - 로스터 = 탭(드래그 정렬). 탭 순서 = 턴 순서. 체크된 것 = 주요 참여자.
-//  - 참견 모드: turn(턴제) = 참여자 각 1회, 탭 순서. free(자유) = 라운드 반복(끼어들기 emergent),
-//    maxRounds 바퀴 안전판(강제 아님 — 호명 기반 종료는 P3에서 합류).
-//  - canonical: 매 턴 [방 구성(로스터) + 전체 대화] 재주입(세션 메모리 비의존).
+// 모델(확정):
+//  - 로스터 = 탭(드래그 정렬). 탭 순서 = 발화 순서. 체크된 것 = 참여자.
+//  - 모드: turn(순차)=각 1회 탭 순서 / simul(동시)=병렬 1회 / facil(진행)=진행자가 동시/순차/선택으로 조율
+//    (라이브 driveFacilitated 는 main.ts). 라운드로빈('free')은 폐기.
+//  - canonical: 매 발화 [방 구성(로스터) + 전체 대화] 재주입(세션 메모리 비의존).
 
 export interface RosterEntry {
   id: string;
   checked: boolean;
 }
-export type KibitzMode = "turn" | "free" | "simul";
+export type KibitzMode = "turn" | "facil" | "simul";
 export interface Utterance {
   who: string; // 에이전트 id 또는 "human"
   text: string;
@@ -20,28 +20,45 @@ export interface Utterance {
 
 export type TurnFn = (agentId: string, prompt: string) => Promise<string>;
 
-// 참여자 = 체크된 에이전트, 탭(배열) 순서 보존 = 턴 순서.
+// 참여자 = 체크된 에이전트, 탭(배열) 순서 보존 = 발화 순서.
 export function participants(roster: RosterEntry[]): string[] {
   return roster.filter((r) => r.checked).map((r) => r.id);
 }
 
-// 다음 발화자 — 이번 교환에서 나온 에이전트 발화 수(agentTurnCount) 기준.
-//  turn: 참여자 각 1회(탭 순서). 한 바퀴 돌면 끝(null).
-//  free: 탭 순서 라운드 반복, 최대 maxRounds 바퀴(폭주 방지 cap — 강제 아닌 안전판). 초과 시 끝.
-export function nextSpeaker(
-  parts: string[],
-  mode: KibitzMode,
-  agentTurnCount: number,
-  maxRounds: number,
-): string | null {
-  if (parts.length === 0) return null;
-  if (mode === "turn") return agentTurnCount < parts.length ? parts[agentTurnCount] : null;
-  const cap = Math.max(1, maxRounds) * parts.length;
-  return agentTurnCount < cap ? parts[agentTurnCount % parts.length] : null;
+// 다음 발화자 — 참여자 각 1회(탭 순서). 한 바퀴 돌면 끝(null). 라운드로빈 폐기 — 한 라운드만.
+export function nextSpeaker(parts: string[], agentTurnCount: number): string | null {
+  return agentTurnCount < parts.length ? parts[agentTurnCount] : null;
 }
 
-// canonical 턴 프롬프트 — 매 턴 [방 구성(로스터) + 전체 대화]를 재주입(세션 메모리 비의존). speaker 1인칭.
-// preamble = 상위(P3 초대장 등)가 끼우는 추가 지시. 없으면 기본 협업 지시(역할 고정 X — 자기 턴에 실작업).
+// 진행자(facilitator) 기본값 = 체크된 첫 에이전트(탭 순서). 없으면 null. (UI 의 명시 facilitatorId 가 우선)
+export function pickFacilitator(roster: RosterEntry[]): string | null {
+  const p = participants(roster);
+  return p.length ? p[0] : null;
+}
+
+export type FacilPattern = "simul" | "turn" | "select" | "none";
+// 진행자 발화에서 오케스트레이션 지시 추출 — 다음에 누구를 어떻게 부를지.
+//  targets = @지목된 동료(detectMentions 재사용). pattern: '다 같이/동시' → simul, '차례로/순차' → turn,
+//  @지목만(태그 없음) → select(그 동료만), 지시 전무 → none(진행자만 답 = 마무리 신호).
+export function parseFacilitatorDirective(
+  text: string,
+  roster: string[],
+  facilitatorId: string,
+  nameOf: (id: string) => string,
+): { pattern: FacilPattern; targets: string[] } {
+  const targets = detectMentions(text, roster, facilitatorId, nameOf);
+  const simul = /\[동시\]|다\s*같이|동시에|모두\s*(답|의견|말)/.test(text);
+  const seq = /\[순차\]|차례(로|대로)|순서대로|돌아가/.test(text);
+  let pattern: FacilPattern;
+  if (simul) pattern = "simul";
+  else if (seq) pattern = "turn";
+  else if (targets.length) pattern = "select";
+  else pattern = "none";
+  return { pattern, targets };
+}
+
+// canonical 발화 프롬프트 — 매 발화 [방 구성(로스터) + 전체 대화]를 재주입(세션 메모리 비의존). speaker 1인칭.
+// preamble = 상위(페르소나)가 끼우는 지시. 없으면 기본 협업 지시(역할 고정 X — 자기 발화에 실작업).
 export function buildPrompt(opts: {
   roster: RosterEntry[];
   conversation: Utterance[];
@@ -67,30 +84,24 @@ export function buildPrompt(opts: {
   return `${base}${convo}`;
 }
 
-// driveExchange — 한 교환의 핵심 루프(라이브·헤드리스 공용). 참견 모드대로 참여자가 턴을 돈다. 각 턴:
-// canonical 프롬프트 → turn(). turn() 실패/빈 응답은 그 발화만 건너뛴다(대화 지속, 견고함 규율).
-//
-// 사람 참견 — turn() 도중 사람이 끼어들면(호출자가 conversation 에 사람 메시지 append + 플래그 set),
-// 그 턴 직후 consumeInterject() 가 true → 그 발화를 폐기하고 **같은 화자를 재시작**한다(턴 미advance →
-// conversation 에 반영된 사람 메시지를 보고 다시 말함). 렌더·연결·cancel 은 turn()/콜백으로 분리(DOM/엔진 비의존).
-// conversation 은 호출자와 공유(in-place) — 에이전트 발화는 여기서 push.
+// driveExchange — 한 교환(참여자 각 1회, 탭 순서). 헤드리스 converse·테스트용. 라이브는 main.ts driveSequential.
+// 각 발화: canonical 프롬프트 → turn(). turn() 실패/빈 응답은 그 발화만 건너뛴다(대화 지속, 견고함 규율).
+// 참견(consumeInterject true)이면 그 발화 폐기 + 같은 화자 재시작. conversation 공유(in-place) — 발화는 여기서 push.
 export async function driveExchange(opts: {
   roster: RosterEntry[];
-  mode: KibitzMode;
-  conversation: Utterance[]; // 공유(in-place) — 사람 메시지는 호출자가, 에이전트 발화는 여기서 append
-  maxRounds: number;
+  conversation: Utterance[];
   turn: TurnFn;
-  consumeInterject?: () => boolean; // 직전 턴 중 사람 참견? (읽으며 리셋) — 없으면 참견 없음
+  consumeInterject?: () => boolean;
   nameOf?: (id: string) => string;
   preamble?: (speaker: string) => string;
   onTurnStart?: (speaker: string) => void;
   onUtterance?: (u: Utterance) => void;
-  onDiscard?: (speaker: string) => void; // 참견으로 폐기된 발화
+  onDiscard?: (speaker: string) => void;
 }): Promise<void> {
   const parts = participants(opts.roster);
   let agentTurns = 0;
   for (;;) {
-    const speaker = nextSpeaker(parts, opts.mode, agentTurns, opts.maxRounds);
+    const speaker = nextSpeaker(parts, agentTurns);
     if (!speaker) break;
     opts.onTurnStart?.(speaker);
     const prompt = buildPrompt({
@@ -119,12 +130,11 @@ export async function driveExchange(opts: {
   }
 }
 
-// driveSimul — 동시(simul) 모드. 턴테이킹 없음: 전원이 같은 맥락(현재 대화의 스냅샷)을 보고 **병렬로** 1회씩
-// 응답한다. 서로의 동시 응답은 못 본다(스냅샷 고정 — 한 사람 질문에 다 같이 반응하는 그룹챗 모델). 완료된 발화는
-// 도착 순서대로 conversation 에 push(동시이므로 순서는 완료 시점). 참견·재시작 없음(원샷 라운드).
+// driveSimul — 동시(simul) 모드. 턴테이킹 없음: 전원이 같은 맥락(스냅샷)을 보고 **병렬로** 1회씩 응답.
+// 서로의 동시 응답은 못 본다(스냅샷 고정). 완료 발화는 도착 순서대로 push. 참견·재시작 없음(원샷 라운드).
 export async function driveSimul(opts: {
   roster: RosterEntry[];
-  conversation: Utterance[]; // 공유(in-place) — 사람 메시지는 호출자가, 에이전트 발화는 여기서 append
+  conversation: Utterance[];
   turn: TurnFn;
   nameOf?: (id: string) => string;
   preamble?: (speaker: string) => string;
@@ -158,12 +168,10 @@ export async function driveSimul(opts: {
   );
 }
 
-// 헤드리스 1교환(참견 없음) — driveExchange 위 얇은 래퍼. 대화 복사본으로 돌리고 이번 교환의 에이전트 발화만 반환.
+// 헤드리스 1교환(참견 없음) — driveExchange 위 얇은 래퍼. 대화 복사본으로 돌리고 이번 교환의 발화만 반환.
 export async function runExchange(opts: {
   roster: RosterEntry[];
-  mode: KibitzMode;
   conversation: Utterance[]; // 원본 변형 안 함(복사)
-  maxRounds: number;
   turn: TurnFn;
   nameOf?: (id: string) => string;
   preamble?: (speaker: string) => string;
@@ -172,9 +180,7 @@ export async function runExchange(opts: {
   const produced: Utterance[] = [];
   await driveExchange({
     roster: opts.roster,
-    mode: opts.mode,
     conversation: opts.conversation.slice(),
-    maxRounds: opts.maxRounds,
     turn: opts.turn,
     nameOf: opts.nameOf,
     preamble: opts.preamble,
@@ -186,37 +192,65 @@ export async function runExchange(opts: {
   return produced;
 }
 
-// 초대장(페르소나) — 매 턴 프롬프트의 preamble. 방 정체성 + 인간 그룹 대화의 결을 주입. 이게 없으면 에이전트가
-// 솔로 세션처럼 굴거나 기계적으로 턴을 채운다. simul=동시 모드 한정 소프트 노트(상대 말 끝까지·지목 답 기다림, 강제 X).
+// base 방 페르소나 — 방 정체성 + 인간 그룹 대화의 결(모드 무관 공통). 모드별 발언 규범은 호출자가 덧붙인다.
+function studioBase(speaker: string, others: string[], place: string, nameOf: (id: string) => string): string {
+  const room = others.length
+    ? `동료 ${others.join(", ")} 와(과) 당신(${nameOf(speaker)})이 함께 있습니다.`
+    : `지금은 당신(${nameOf(speaker)}) 혼자입니다.`;
+  const at = `@${others[0] ?? "동료"}`;
+  return (
+    `여기는 'Studio' — 여러 AI 코딩 에이전트가 한 워크스페이스에서 사용자의 일을 함께 하는 협업 채팅방입니다. ` +
+    `${room}${place}\n` +
+    `당신은 ${nameOf(speaker)} 본인으로서 자연스럽게 참여하세요:\n` +
+    `- 방금 나온 말에 곧바로 반응하세요 — 동의·보충·반론·질문. 길게 독백하지 말고 짧게 주고받으세요.\n` +
+    `- 이미 나온 말은 반복하지 마세요. 같은 결론이면 짧게 동의만 하고, 다르면 그 관점을 보태세요.\n` +
+    `- 할 말이 없으면 침묵해도 됩니다(침묵도 참여입니다).\n` +
+    `- 특정 동료의 답이 필요하면 본문에 '${at}'처럼 '@이름'으로 지목하세요.\n` +
+    `- 작업이 필요하면 설명만 하지 말고 당신의 도구로 실제 파일/명령으로 처리하세요(위 작업 디렉터리 기준).\n` +
+    `- 당신의 내부 절차(어떤 스킬을 쓰는지, 세션 설정·규칙 확인 등)는 대화에 적지 마세요 — 인사·의견·결과만 자연스럽게.`
+  );
+}
+
+// 초대장(페르소나) — 매 발화 프롬프트의 preamble. base + 모드별 발언 규범. mode 로 turn/simul/facil-참여자 분기.
 export function inviteePreamble(
   speaker: string,
   roster: string[],
   nameOf: (id: string) => string,
   cwd?: string,
-  simul?: boolean,
+  mode?: KibitzMode,
 ): string {
   const others = roster.filter((id) => id !== speaker).map(nameOf);
-  const room = others.length
-    ? `동료 ${others.join(", ")} 와(과) 당신(${nameOf(speaker)})이 함께 있습니다.`
-    : `지금은 당신(${nameOf(speaker)}) 혼자입니다.`;
   const place = cwd ? ` 작업 디렉터리는 ${cwd} 입니다.` : "";
-  const at = `@${others[0] ?? "동료"}`;
-  // 동시(simul) 모드 — 전원이 같은 순간에 답해 서로의 답을 못 봄. 양보·기다림은 소프트(강제 X — 턴제 강요는 대화를 굳힌다).
-  const simulNote = simul
-    ? `\n[동시 발화] 지금은 모두가 같은 순간에 답합니다 — 이번 차례엔 서로의 답을 아직 못 봅니다. 되도록 상대의 말을 끝까지 듣고, 누군가 '@이름'으로 지목하면 그 동료의 답을 기다려 주세요. 강제는 아닙니다 — 자연스러우면 그대로 답하세요.`
-    : "";
+  const note =
+    mode === "simul"
+      ? `\n[동시] 지금은 모두가 같은 순간에 답합니다 — 이번 차례엔 서로의 답을 아직 못 봅니다. 되도록 상대의 말을 끝까지 듣고, 누군가 '@이름'으로 지목하면 그 동료의 답을 기다려 주세요. 강제는 아닙니다 — 자연스러우면 그대로 답하세요.`
+      : mode === "turn"
+        ? `\n[순차] 지금은 차례대로 한 명씩 말합니다. 당신 차례에 짧게 한마디, 남의 차례엔 경청하세요.`
+        : mode === "facil"
+          ? `\n[진행] 이 방은 진행자가 흐름을 조율합니다. 진행자가 당신을 부르면(또는 '@이름'으로 지목하면) 답하고, 안 불리면 나서지 말고 기다리세요.`
+          : "";
+  return studioBase(speaker, others, place, nameOf) + note;
+}
+
+// 진행자(facilitator) 페르소나 — 진행 모드의 진행자 전용. 사람의 단일 창구 + 동료 조율 + 종료 판단.
+export function facilitatorPreamble(
+  facilitator: string,
+  roster: string[],
+  nameOf: (id: string) => string,
+  cwd?: string,
+): string {
+  const others = roster.filter((id) => id !== facilitator).map(nameOf);
+  const place = cwd ? ` 작업 디렉터리는 ${cwd} 입니다.` : "";
+  const ex = others[0] ?? "동료";
   return (
-    `여기는 'Studio' — 여러 AI 코딩 에이전트가 한 워크스페이스에서 사용자의 일을 함께 하는 협업 채팅방입니다. ` +
-    `${room}${place}\n` +
-    `당신은 ${nameOf(speaker)} 본인으로서, 여러 사람이 한자리에 모여 이야기하듯 참여하세요. 사람들의 대화는 이렇게 흐릅니다:\n` +
-    `- 순서는 기계적이지 않습니다. 차례를 채우려 말하지 말고, 보탤 게 있을 때 말하세요. 할 말이 없으면 듣고 넘겨도 됩니다(침묵도 참여입니다).\n` +
-    `- 방금 나온 말에 곧바로 반응하세요 — 동의·보충·반론·질문. 길게 독백하지 말고 짧게 주고받으세요.\n` +
-    `- 이미 나온 말은 반복하지 마세요. 같은 결론이면 짧게 동의만 하고, 다르면 그 관점을 보태세요.\n` +
-    `- 가끔은 두 사람이 한 주제를 깊이 주고받습니다 — 억지로 끼어들지 말고 지켜보다, 정말 보탤 게 생기면 들어오세요. 누구도 억지로 끌어들이지는 마세요. 다만 아무도 잊지도 마세요 — 어떤 주제가 특정 동료의 몫이면 자연스럽게 부르면 됩니다.\n` +
-    `- 특정 동료의 답이 필요하면 본문에 '${at}'처럼 '@이름'으로 지목하세요 — 지목된 동료가 이어서 답합니다.\n` +
-    `- 작업이 필요하면 설명만 하지 말고 당신의 도구로 실제 파일/명령으로 처리하세요(위 작업 디렉터리 기준).\n` +
-    `- 당신의 내부 절차(어떤 스킬을 쓰는지, 세션 설정·규칙 확인 등)는 대화에 적지 마세요 — 인사·의견·결과만 자연스럽게.` +
-    simulNote
+    studioBase(facilitator, others, place, nameOf) +
+    `\n[진행자] 당신은 이 대화의 진행자입니다. 사람은 당신에게 말합니다.\n` +
+    `- 직접 답하거나, 동료를 끌어들여 조율하세요. 부르는 법:\n` +
+    `   · 다 같이(동시) — "다 같이 의견 줘요" 처럼.\n` +
+    `   · 차례로(순차) — "차례로 의견 줘요" 처럼.\n` +
+    `   · 특정 동료만 — "@${ex} 이건 어때?" 처럼 '@이름'으로.\n` +
+    `- 동료 답이 오면 종합하고, 더 볼 게 없으면 마무리하세요. **아무도 부르지 않고 답하면 대화가 종료**됩니다.\n` +
+    `- 이어갈 때는 누구를 어떻게 부를지 위 방식으로 분명히 지시하세요.`
   );
 }
 

@@ -50,11 +50,23 @@ function createEngine(app) {
 function participants(roster) {
   return roster.filter((r) => r.checked).map((r) => r.id);
 }
-function nextSpeaker(parts, mode, agentTurnCount, maxRounds) {
-  if (parts.length === 0) return null;
-  if (mode === "turn") return agentTurnCount < parts.length ? parts[agentTurnCount] : null;
-  const cap = Math.max(1, maxRounds) * parts.length;
-  return agentTurnCount < cap ? parts[agentTurnCount % parts.length] : null;
+function nextSpeaker(parts, agentTurnCount) {
+  return agentTurnCount < parts.length ? parts[agentTurnCount] : null;
+}
+function pickFacilitator(roster) {
+  const p = participants(roster);
+  return p.length ? p[0] : null;
+}
+function parseFacilitatorDirective(text, roster, facilitatorId, nameOf2) {
+  const targets = detectMentions(text, roster, facilitatorId, nameOf2);
+  const simul = /\[동시\]|다\s*같이|동시에|모두\s*(답|의견|말)/.test(text);
+  const seq = /\[순차\]|차례(로|대로)|순서대로|돌아가/.test(text);
+  let pattern;
+  if (simul) pattern = "simul";
+  else if (seq) pattern = "turn";
+  else if (targets.length) pattern = "select";
+  else pattern = "none";
+  return { pattern, targets };
 }
 function buildPrompt(opts) {
   const name = (id) => opts.nameOf ? opts.nameOf(id) : id;
@@ -74,7 +86,7 @@ async function driveExchange(opts) {
   const parts = participants(opts.roster);
   let agentTurns = 0;
   for (; ; ) {
-    const speaker = nextSpeaker(parts, opts.mode, agentTurns, opts.maxRounds);
+    const speaker = nextSpeaker(parts, agentTurns);
     if (!speaker) break;
     opts.onTurnStart?.(speaker);
     const prompt = buildPrompt({
@@ -129,22 +141,39 @@ async function driveSimul(opts) {
     })
   );
 }
-function inviteePreamble(speaker, roster, nameOf2, cwd, simul) {
-  const others = roster.filter((id) => id !== speaker).map(nameOf2);
+function studioBase(speaker, others, place, nameOf2) {
   const room = others.length ? `\uB3D9\uB8CC ${others.join(", ")} \uC640(\uACFC) \uB2F9\uC2E0(${nameOf2(speaker)})\uC774 \uD568\uAED8 \uC788\uC2B5\uB2C8\uB2E4.` : `\uC9C0\uAE08\uC740 \uB2F9\uC2E0(${nameOf2(speaker)}) \uD63C\uC790\uC785\uB2C8\uB2E4.`;
-  const place = cwd ? ` \uC791\uC5C5 \uB514\uB809\uD130\uB9AC\uB294 ${cwd} \uC785\uB2C8\uB2E4.` : "";
   const at = `@${others[0] ?? "\uB3D9\uB8CC"}`;
-  const simulNote = simul ? `
-[\uB3D9\uC2DC \uBC1C\uD654] \uC9C0\uAE08\uC740 \uBAA8\uB450\uAC00 \uAC19\uC740 \uC21C\uAC04\uC5D0 \uB2F5\uD569\uB2C8\uB2E4 \u2014 \uC774\uBC88 \uCC28\uB840\uC5D4 \uC11C\uB85C\uC758 \uB2F5\uC744 \uC544\uC9C1 \uBABB \uBD05\uB2C8\uB2E4. \uB418\uB3C4\uB85D \uC0C1\uB300\uC758 \uB9D0\uC744 \uB05D\uAE4C\uC9C0 \uB4E3\uACE0, \uB204\uAD70\uAC00 '@\uC774\uB984'\uC73C\uB85C \uC9C0\uBAA9\uD558\uBA74 \uADF8 \uB3D9\uB8CC\uC758 \uB2F5\uC744 \uAE30\uB2E4\uB824 \uC8FC\uC138\uC694. \uAC15\uC81C\uB294 \uC544\uB2D9\uB2C8\uB2E4 \u2014 \uC790\uC5F0\uC2A4\uB7EC\uC6B0\uBA74 \uADF8\uB300\uB85C \uB2F5\uD558\uC138\uC694.` : "";
   return `\uC5EC\uAE30\uB294 'Studio' \u2014 \uC5EC\uB7EC AI \uCF54\uB529 \uC5D0\uC774\uC804\uD2B8\uAC00 \uD55C \uC6CC\uD06C\uC2A4\uD398\uC774\uC2A4\uC5D0\uC11C \uC0AC\uC6A9\uC790\uC758 \uC77C\uC744 \uD568\uAED8 \uD558\uB294 \uD611\uC5C5 \uCC44\uD305\uBC29\uC785\uB2C8\uB2E4. ${room}${place}
-\uB2F9\uC2E0\uC740 ${nameOf2(speaker)} \uBCF8\uC778\uC73C\uB85C\uC11C, \uC5EC\uB7EC \uC0AC\uB78C\uC774 \uD55C\uC790\uB9AC\uC5D0 \uBAA8\uC5EC \uC774\uC57C\uAE30\uD558\uB4EF \uCC38\uC5EC\uD558\uC138\uC694. \uC0AC\uB78C\uB4E4\uC758 \uB300\uD654\uB294 \uC774\uB807\uAC8C \uD750\uB985\uB2C8\uB2E4:
-- \uC21C\uC11C\uB294 \uAE30\uACC4\uC801\uC774\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uCC28\uB840\uB97C \uCC44\uC6B0\uB824 \uB9D0\uD558\uC9C0 \uB9D0\uACE0, \uBCF4\uD0E4 \uAC8C \uC788\uC744 \uB54C \uB9D0\uD558\uC138\uC694. \uD560 \uB9D0\uC774 \uC5C6\uC73C\uBA74 \uB4E3\uACE0 \uB118\uACA8\uB3C4 \uB429\uB2C8\uB2E4(\uCE68\uBB35\uB3C4 \uCC38\uC5EC\uC785\uB2C8\uB2E4).
+\uB2F9\uC2E0\uC740 ${nameOf2(speaker)} \uBCF8\uC778\uC73C\uB85C\uC11C \uC790\uC5F0\uC2A4\uB7FD\uAC8C \uCC38\uC5EC\uD558\uC138\uC694:
 - \uBC29\uAE08 \uB098\uC628 \uB9D0\uC5D0 \uACE7\uBC14\uB85C \uBC18\uC751\uD558\uC138\uC694 \u2014 \uB3D9\uC758\xB7\uBCF4\uCDA9\xB7\uBC18\uB860\xB7\uC9C8\uBB38. \uAE38\uAC8C \uB3C5\uBC31\uD558\uC9C0 \uB9D0\uACE0 \uC9E7\uAC8C \uC8FC\uACE0\uBC1B\uC73C\uC138\uC694.
 - \uC774\uBBF8 \uB098\uC628 \uB9D0\uC740 \uBC18\uBCF5\uD558\uC9C0 \uB9C8\uC138\uC694. \uAC19\uC740 \uACB0\uB860\uC774\uBA74 \uC9E7\uAC8C \uB3D9\uC758\uB9CC \uD558\uACE0, \uB2E4\uB974\uBA74 \uADF8 \uAD00\uC810\uC744 \uBCF4\uD0DC\uC138\uC694.
-- \uAC00\uB054\uC740 \uB450 \uC0AC\uB78C\uC774 \uD55C \uC8FC\uC81C\uB97C \uAE4A\uC774 \uC8FC\uACE0\uBC1B\uC2B5\uB2C8\uB2E4 \u2014 \uC5B5\uC9C0\uB85C \uB07C\uC5B4\uB4E4\uC9C0 \uB9D0\uACE0 \uC9C0\uCF1C\uBCF4\uB2E4, \uC815\uB9D0 \uBCF4\uD0E4 \uAC8C \uC0DD\uAE30\uBA74 \uB4E4\uC5B4\uC624\uC138\uC694. \uB204\uAD6C\uB3C4 \uC5B5\uC9C0\uB85C \uB04C\uC5B4\uB4E4\uC774\uC9C0\uB294 \uB9C8\uC138\uC694. \uB2E4\uB9CC \uC544\uBB34\uB3C4 \uC78A\uC9C0\uB3C4 \uB9C8\uC138\uC694 \u2014 \uC5B4\uB5A4 \uC8FC\uC81C\uAC00 \uD2B9\uC815 \uB3D9\uB8CC\uC758 \uBAAB\uC774\uBA74 \uC790\uC5F0\uC2A4\uB7FD\uAC8C \uBD80\uB974\uBA74 \uB429\uB2C8\uB2E4.
-- \uD2B9\uC815 \uB3D9\uB8CC\uC758 \uB2F5\uC774 \uD544\uC694\uD558\uBA74 \uBCF8\uBB38\uC5D0 '${at}'\uCC98\uB7FC '@\uC774\uB984'\uC73C\uB85C \uC9C0\uBAA9\uD558\uC138\uC694 \u2014 \uC9C0\uBAA9\uB41C \uB3D9\uB8CC\uAC00 \uC774\uC5B4\uC11C \uB2F5\uD569\uB2C8\uB2E4.
+- \uD560 \uB9D0\uC774 \uC5C6\uC73C\uBA74 \uCE68\uBB35\uD574\uB3C4 \uB429\uB2C8\uB2E4(\uCE68\uBB35\uB3C4 \uCC38\uC5EC\uC785\uB2C8\uB2E4).
+- \uD2B9\uC815 \uB3D9\uB8CC\uC758 \uB2F5\uC774 \uD544\uC694\uD558\uBA74 \uBCF8\uBB38\uC5D0 '${at}'\uCC98\uB7FC '@\uC774\uB984'\uC73C\uB85C \uC9C0\uBAA9\uD558\uC138\uC694.
 - \uC791\uC5C5\uC774 \uD544\uC694\uD558\uBA74 \uC124\uBA85\uB9CC \uD558\uC9C0 \uB9D0\uACE0 \uB2F9\uC2E0\uC758 \uB3C4\uAD6C\uB85C \uC2E4\uC81C \uD30C\uC77C/\uBA85\uB839\uC73C\uB85C \uCC98\uB9AC\uD558\uC138\uC694(\uC704 \uC791\uC5C5 \uB514\uB809\uD130\uB9AC \uAE30\uC900).
-- \uB2F9\uC2E0\uC758 \uB0B4\uBD80 \uC808\uCC28(\uC5B4\uB5A4 \uC2A4\uD0AC\uC744 \uC4F0\uB294\uC9C0, \uC138\uC158 \uC124\uC815\xB7\uADDC\uCE59 \uD655\uC778 \uB4F1)\uB294 \uB300\uD654\uC5D0 \uC801\uC9C0 \uB9C8\uC138\uC694 \u2014 \uC778\uC0AC\xB7\uC758\uACAC\xB7\uACB0\uACFC\uB9CC \uC790\uC5F0\uC2A4\uB7FD\uAC8C.` + simulNote;
+- \uB2F9\uC2E0\uC758 \uB0B4\uBD80 \uC808\uCC28(\uC5B4\uB5A4 \uC2A4\uD0AC\uC744 \uC4F0\uB294\uC9C0, \uC138\uC158 \uC124\uC815\xB7\uADDC\uCE59 \uD655\uC778 \uB4F1)\uB294 \uB300\uD654\uC5D0 \uC801\uC9C0 \uB9C8\uC138\uC694 \u2014 \uC778\uC0AC\xB7\uC758\uACAC\xB7\uACB0\uACFC\uB9CC \uC790\uC5F0\uC2A4\uB7FD\uAC8C.`;
+}
+function inviteePreamble(speaker, roster, nameOf2, cwd, mode) {
+  const others = roster.filter((id) => id !== speaker).map(nameOf2);
+  const place = cwd ? ` \uC791\uC5C5 \uB514\uB809\uD130\uB9AC\uB294 ${cwd} \uC785\uB2C8\uB2E4.` : "";
+  const note = mode === "simul" ? `
+[\uB3D9\uC2DC] \uC9C0\uAE08\uC740 \uBAA8\uB450\uAC00 \uAC19\uC740 \uC21C\uAC04\uC5D0 \uB2F5\uD569\uB2C8\uB2E4 \u2014 \uC774\uBC88 \uCC28\uB840\uC5D4 \uC11C\uB85C\uC758 \uB2F5\uC744 \uC544\uC9C1 \uBABB \uBD05\uB2C8\uB2E4. \uB418\uB3C4\uB85D \uC0C1\uB300\uC758 \uB9D0\uC744 \uB05D\uAE4C\uC9C0 \uB4E3\uACE0, \uB204\uAD70\uAC00 '@\uC774\uB984'\uC73C\uB85C \uC9C0\uBAA9\uD558\uBA74 \uADF8 \uB3D9\uB8CC\uC758 \uB2F5\uC744 \uAE30\uB2E4\uB824 \uC8FC\uC138\uC694. \uAC15\uC81C\uB294 \uC544\uB2D9\uB2C8\uB2E4 \u2014 \uC790\uC5F0\uC2A4\uB7EC\uC6B0\uBA74 \uADF8\uB300\uB85C \uB2F5\uD558\uC138\uC694.` : mode === "turn" ? `
+[\uC21C\uCC28] \uC9C0\uAE08\uC740 \uCC28\uB840\uB300\uB85C \uD55C \uBA85\uC529 \uB9D0\uD569\uB2C8\uB2E4. \uB2F9\uC2E0 \uCC28\uB840\uC5D0 \uC9E7\uAC8C \uD55C\uB9C8\uB514, \uB0A8\uC758 \uCC28\uB840\uC5D4 \uACBD\uCCAD\uD558\uC138\uC694.` : mode === "facil" ? `
+[\uC9C4\uD589] \uC774 \uBC29\uC740 \uC9C4\uD589\uC790\uAC00 \uD750\uB984\uC744 \uC870\uC728\uD569\uB2C8\uB2E4. \uC9C4\uD589\uC790\uAC00 \uB2F9\uC2E0\uC744 \uBD80\uB974\uBA74(\uB610\uB294 '@\uC774\uB984'\uC73C\uB85C \uC9C0\uBAA9\uD558\uBA74) \uB2F5\uD558\uACE0, \uC548 \uBD88\uB9AC\uBA74 \uB098\uC11C\uC9C0 \uB9D0\uACE0 \uAE30\uB2E4\uB9AC\uC138\uC694.` : "";
+  return studioBase(speaker, others, place, nameOf2) + note;
+}
+function facilitatorPreamble(facilitator, roster, nameOf2, cwd) {
+  const others = roster.filter((id) => id !== facilitator).map(nameOf2);
+  const place = cwd ? ` \uC791\uC5C5 \uB514\uB809\uD130\uB9AC\uB294 ${cwd} \uC785\uB2C8\uB2E4.` : "";
+  const ex = others[0] ?? "\uB3D9\uB8CC";
+  return studioBase(facilitator, others, place, nameOf2) + `
+[\uC9C4\uD589\uC790] \uB2F9\uC2E0\uC740 \uC774 \uB300\uD654\uC758 \uC9C4\uD589\uC790\uC785\uB2C8\uB2E4. \uC0AC\uB78C\uC740 \uB2F9\uC2E0\uC5D0\uAC8C \uB9D0\uD569\uB2C8\uB2E4.
+- \uC9C1\uC811 \uB2F5\uD558\uAC70\uB098, \uB3D9\uB8CC\uB97C \uB04C\uC5B4\uB4E4\uC5EC \uC870\uC728\uD558\uC138\uC694. \uBD80\uB974\uB294 \uBC95:
+   \xB7 \uB2E4 \uAC19\uC774(\uB3D9\uC2DC) \u2014 "\uB2E4 \uAC19\uC774 \uC758\uACAC \uC918\uC694" \uCC98\uB7FC.
+   \xB7 \uCC28\uB840\uB85C(\uC21C\uCC28) \u2014 "\uCC28\uB840\uB85C \uC758\uACAC \uC918\uC694" \uCC98\uB7FC.
+   \xB7 \uD2B9\uC815 \uB3D9\uB8CC\uB9CC \u2014 "@${ex} \uC774\uAC74 \uC5B4\uB54C?" \uCC98\uB7FC '@\uC774\uB984'\uC73C\uB85C.
+- \uB3D9\uB8CC \uB2F5\uC774 \uC624\uBA74 \uC885\uD569\uD558\uACE0, \uB354 \uBCFC \uAC8C \uC5C6\uC73C\uBA74 \uB9C8\uBB34\uB9AC\uD558\uC138\uC694. **\uC544\uBB34\uB3C4 \uBD80\uB974\uC9C0 \uC54A\uACE0 \uB2F5\uD558\uBA74 \uB300\uD654\uAC00 \uC885\uB8CC**\uB429\uB2C8\uB2E4.
+- \uC774\uC5B4\uAC08 \uB54C\uB294 \uB204\uAD6C\uB97C \uC5B4\uB5BB\uAC8C \uBD80\uB97C\uC9C0 \uC704 \uBC29\uC2DD\uC73C\uB85C \uBD84\uBA85\uD788 \uC9C0\uC2DC\uD558\uC138\uC694.`;
 }
 function detectMentions(text, roster, speaker, nameOf2) {
   const hay = text.toLowerCase();
@@ -174,7 +203,7 @@ var ACTIVE_AGENTS = AGENTS.filter((a) => !a.hidden);
 var NAME = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 var COLOR = Object.fromEntries(AGENTS.map((a) => [a.id, a.color]));
 var nameOf = (id) => NAME[id] ?? id;
-var FREE_ROUNDS = 2;
+var FACIL_MAX_ROUNDS = 6;
 var CSS = `
 .st{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
 .st-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto;flex-wrap:wrap}
@@ -185,6 +214,9 @@ var CSS = `
 .st-tab.drag{opacity:.5}
 .st-tab .chk{width:13px;height:13px;border-radius:4px;border:1.5px solid currentColor;display:inline-flex;align-items:center;justify-content:center;font-size:10px;line-height:1}
 .st-tab .nm{font-weight:600}
+.st-crown{cursor:pointer;font-size:10px;opacity:.3;user-select:none;filter:grayscale(1)}
+.st-crown:hover{opacity:.7}
+.st-crown.on{opacity:1;filter:none}
 .st-kib{margin-left:4px;display:inline-flex;border-radius:8px;overflow:hidden;border:1px solid rgba(127,127,127,.28)}
 .st-kib button{appearance:none;border:0;background:transparent;color:inherit;opacity:.6;font:inherit;font-size:11px;padding:3px 9px;cursor:pointer}
 .st-kib button.on{opacity:1;background:rgba(127,127,127,.2);font-weight:700}
@@ -222,9 +254,10 @@ var main_default = {
     const settingPolicy = () => app.settings?.get("permissionPolicy") || void 0;
     const settingMode = () => {
       const v = app.settings?.get("kibitzDefault");
-      return v === "free" || v === "simul" ? v : "turn";
+      return v === "facil" || v === "simul" ? v : "turn";
     };
     const settingDepthCap = () => Math.max(1, Number(app.settings?.get("nameTriggerDepthCap")) || 4);
+    const settingFacilMax = () => Math.max(1, Number(app.settings?.get("facilMaxRounds")) || FACIL_MAX_ROUNDS);
     const projectCwd = () => app.project?.current?.()?.root;
     let activeStudio = null;
     ctx.subscriptions.push(
@@ -232,13 +265,13 @@ var main_default = {
         description: "\uD65C\uC131 Studio \uBDF0\uC5D0 \uC0AC\uB78C \uBA54\uC2DC\uC9C0\uB97C \uBCF4\uB0B8\uB2E4(textarea \uC804\uC1A1\uACFC \uB3D9\uC77C \u2014 \uB300\uD654 \uAD6C\uB3D9/\uCC38\uACAC). \uB178\uCD9C command \uC790\uB3D9\uD654\xB7E2E \uC6A9",
         params: {
           text: { type: "string", required: true, description: "\uBCF4\uB0BC \uBA54\uC2DC\uC9C0" },
-          mode: { type: "string", description: "turn|free|simul \u2014 \uC804\uC1A1 \uC804 \uBAA8\uB4DC \uC124\uC815(E2E\xB7\uC790\uB3D9\uD654). \uC0DD\uB7B5 \uC2DC \uC720\uC9C0" }
+          mode: { type: "string", description: "turn|facil|simul \u2014 \uC804\uC1A1 \uC804 \uBAA8\uB4DC \uC124\uC815(E2E\xB7\uC790\uB3D9\uD654). \uC0DD\uB7B5 \uC2DC \uC720\uC9C0" }
         },
         handler: async (p) => {
           const text = String(p?.text ?? "").trim();
           if (!text) return { ok: false, error: "text \uD544\uC218" };
           if (!activeStudio) return { ok: false, error: "\uD65C\uC131 Studio \uBDF0 \uC5C6\uC74C(\uBDF0\uB97C \uBA3C\uC800 \uC5EC\uC138\uC694)" };
-          if (p?.mode === "turn" || p?.mode === "free" || p?.mode === "simul") {
+          if (p?.mode === "turn" || p?.mode === "facil" || p?.mode === "simul") {
             activeStudio.mode = p.mode;
           }
           onHuman(activeStudio, text);
@@ -256,6 +289,8 @@ var main_default = {
           return {
             ok: true,
             mode: st.mode,
+            facilitator: st.facilitatorId,
+            // 진행 모드 진행자(👑)
             running: st.running,
             conv: st.conv.length,
             pending: st.pendingHuman.length,
@@ -295,16 +330,14 @@ var main_default = {
     );
     ctx.subscriptions.push(
       app.commands.register("converse", {
-        description: "\uB2E4\uC911 \uC5D0\uC774\uC804\uD2B8 1\uAD50\uD658 \u2014 agents(\uD0ED \uC21C\uC11C)\uAC00 mode(turn/free)\uB85C \uD134\uD14C\uC774\uD0B9, cwd \uC5D0 \uC2E4\uD30C\uC77C. \uBC1C\uD654\xB7\uC4F4 \uD30C\uC77C \uBC18\uD658(\uD5E4\uB4DC\uB9AC\uC2A4 E2E)",
+        description: "\uB2E4\uC911 \uC5D0\uC774\uC804\uD2B8 1\uAD50\uD658 \u2014 agents(\uD0ED \uC21C\uC11C)\uAC00 \uAC01 1\uD68C \uD134\uD14C\uC774\uD0B9, cwd \uC5D0 \uC2E4\uD30C\uC77C. \uBC1C\uD654\xB7\uC4F4 \uD30C\uC77C \uBC18\uD658(\uD5E4\uB4DC\uB9AC\uC2A4 E2E)",
         params: {
           message: { type: "string", required: true, description: "\uC0AC\uB78C \uBA54\uC2DC\uC9C0(\uACFC\uC81C/\uD504\uB86C\uD504\uD2B8)" },
           agents: {
             type: "array",
-            description: "\uCC38\uC5EC \uC21C\uC11C \u2014 preset id \uBB38\uC790\uC5F4(claude,codex,gemini) \uB610\uB294 {id,cmd,args}(\uD5E4\uB4DC\uB9AC\uC2A4 E2E \uB7F0\uCE58). \uAE30\uBCF8 3 preset"
+            description: "\uCC38\uC5EC \uC21C\uC11C \u2014 preset id \uBB38\uC790\uC5F4(claude,codex,gemini) \uB610\uB294 {id,cmd,args}(\uD5E4\uB4DC\uB9AC\uC2A4 E2E \uB7F0\uCE58). \uAE30\uBCF8 \uD65C\uC131 preset"
           },
-          mode: { type: "string", description: "turn(\uD134\uC81C) | free(\uC790\uC720). \uAE30\uBCF8 \uC124\uC815\uAC12" },
-          cwd: { type: "string", description: "\uC791\uC5C5 \uB514\uB809\uD130\uB9AC(\uC2E4\uD30C\uC77C \uAC80\uC99D \uB300\uC0C1)" },
-          maxRounds: { type: "number", description: "free \uBAA8\uB4DC \uB77C\uC6B4\uB4DC \uC0C1\uD55C(\uAE30\uBCF8 2)" }
+          cwd: { type: "string", description: "\uC791\uC5C5 \uB514\uB809\uD130\uB9AC(\uC2E4\uD30C\uC77C \uAC80\uC99D \uB300\uC0C1)" }
         },
         handler: async (p) => {
           const raw = Array.isArray(p.agents) && p.agents.length ? p.agents : ACTIVE_AGENTS.map((a) => a.id);
@@ -312,7 +345,6 @@ var main_default = {
             (a) => typeof a === "string" ? { id: a, agent: a, cmd: void 0, args: void 0 } : { id: String(a.id), agent: void 0, cmd: a.cmd, args: a.args }
           );
           const roster = specs.map((s) => ({ id: s.id, checked: true }));
-          const mode = p.mode === "free" ? "free" : p.mode === "turn" ? "turn" : settingMode();
           const cwd = typeof p.cwd === "string" ? p.cwd : projectCwd();
           const conns = /* @__PURE__ */ new Map();
           const skipped = [];
@@ -341,17 +373,15 @@ var main_default = {
             };
             await driveExchange({
               roster,
-              mode,
               conversation,
-              maxRounds: typeof p.maxRounds === "number" ? p.maxRounds : FREE_ROUNDS,
               nameOf,
-              preamble: (s) => inviteePreamble(s, rosterIds, nameOf, cwd),
+              preamble: (s) => inviteePreamble(s, rosterIds, nameOf, cwd, "turn"),
               turn: async (id, prompt) => (await askAgent(id, prompt)).trim(),
               // 미연결이면 throw → 이 발화 skip
               onUtterance: (u) => utterances.push(u)
             });
             const filesWritten = engine.diffWritten(before, await engine.snapshot(cwd));
-            return { ok: true, order: rosterIds, mode, utterances, filesWritten, skipped };
+            return { ok: true, order: rosterIds, utterances, filesWritten, skipped };
           } catch (e) {
             return { ok: false, error: String(e) };
           } finally {
@@ -408,6 +438,8 @@ var main_default = {
         conv: [],
         conns: /* @__PURE__ */ new Map(),
         running: false,
+        facilitatorId: ACTIVE_AGENTS[0]?.id ?? "",
+        // 기본 진행자 = 첫 활성 에이전트
         pendingHuman: [],
         actives: /* @__PURE__ */ new Set(),
         cwd: projectCwd(),
@@ -419,6 +451,7 @@ var main_default = {
       activeStudio = st;
       const kib = kibitzToggle(st.mode, (m) => {
         st.mode = m;
+        renderTabs(st, tabsEl);
       });
       renderTabs(st, tabsEl);
       bar.append(elText("b", "Studio"), tabsEl, kib, status);
@@ -452,7 +485,7 @@ var main_default = {
         });
         return b;
       };
-      wrap.append(mk("turn", "\uD134\uC81C"), mk("free", "\uC790\uC720"), mk("simul", "\uB3D9\uC2DC"));
+      wrap.append(mk("turn", "\uC21C\uCC28"), mk("facil", "\uC9C4\uD589"), mk("simul", "\uB3D9\uC2DC"));
       return wrap;
     }
     function renderTabs(st, tabsEl) {
@@ -467,6 +500,16 @@ var main_default = {
         const nm = elText("span", a?.label ?? entry.id, "nm");
         nm.style.color = "var(--fg,#ddd)";
         chip.append(chk, nm);
+        if (st.mode === "facil" && entry.checked) {
+          const crown = elText("span", "\u{1F451}", "st-crown" + (entry.id === st.facilitatorId ? " on" : ""));
+          crown.title = "\uC9C4\uD589\uC790\uB85C \uC9C0\uC815";
+          crown.addEventListener("click", (e) => {
+            e.stopPropagation();
+            st.facilitatorId = entry.id;
+            renderTabs(st, tabsEl);
+          });
+          chip.append(crown);
+        }
         chip.addEventListener("click", () => {
           entry.checked = !entry.checked;
           renderTabs(st, tabsEl);
@@ -571,7 +614,7 @@ var main_default = {
       row.remove();
       return "";
     }
-    async function resolveMentions(st, scanFrom, simul) {
+    async function resolveMentions(st, scanFrom) {
       const ids = st.roster.map((x) => x.id);
       let from = scanFrom;
       for (let depth = 0; depth < settingDepthCap(); depth++) {
@@ -592,7 +635,7 @@ var main_default = {
             conversation: st.conv,
             speaker: id,
             nameOf,
-            preamble: `${inviteePreamble(id, ids, nameOf, st.cwd, simul)}
+            preamble: `${inviteePreamble(id, ids, nameOf, st.cwd, st.mode)}
 (\uB2F9\uC2E0\uC774 @${nameOf(id)} \uC73C\uB85C \uC9C0\uBAA9\uB418\uC5C8\uC2B5\uB2C8\uB2E4 \u2014 \uC704 \uB300\uD654\uC5D0 \uC774\uC5B4 \uB2F5\uD558\uC138\uC694.)`
           });
           const work = await runOneTurn(st, id, prompt);
@@ -602,11 +645,8 @@ var main_default = {
     }
     async function driveSequential(st, ids) {
       const parts = participants(st.roster);
-      if (!parts.length) return;
-      const cap = st.mode === "free" ? Math.max(1, FREE_ROUNDS) * parts.length : parts.length;
-      for (let i = 0; i < cap; i++) {
+      for (const speaker of parts) {
         if (st.pendingHuman.length) return;
-        const speaker = parts[i % parts.length];
         if (!st.roster.find((r) => r.id === speaker)?.checked) continue;
         setStatus(st, `${nameOf(speaker)} \uC751\uB2F5 \uC911\u2026`);
         const prompt = buildPrompt({
@@ -614,28 +654,79 @@ var main_default = {
           conversation: st.conv,
           speaker,
           nameOf,
-          preamble: inviteePreamble(speaker, ids, nameOf, st.cwd, false)
+          preamble: inviteePreamble(speaker, ids, nameOf, st.cwd, "turn")
         });
         const work = await runOneTurn(st, speaker, prompt);
         if (work) st.conv.push({ who: speaker, text: work });
         if (st.pendingHuman.length) return;
       }
     }
+    async function facilTurn(st, id, ids) {
+      if (!st.roster.find((r) => r.id === id)?.checked) return;
+      setStatus(st, `${nameOf(id)} \uC751\uB2F5 \uC911\u2026`);
+      const prompt = buildPrompt({
+        roster: st.roster,
+        conversation: st.conv,
+        speaker: id,
+        nameOf,
+        preamble: inviteePreamble(id, ids, nameOf, st.cwd, "facil")
+      });
+      const w = await runOneTurn(st, id, prompt);
+      if (w) st.conv.push({ who: id, text: w });
+    }
+    async function driveFacilitated(st, ids) {
+      const checked = participants(st.roster);
+      if (!checked.length) return;
+      const facilitator = checked.includes(st.facilitatorId) ? st.facilitatorId : pickFacilitator(st.roster) ?? checked[0];
+      const cap = settingFacilMax();
+      for (let round = 0; round < cap; round++) {
+        if (st.pendingHuman.length) return;
+        setStatus(st, `${nameOf(facilitator)} \uC9C4\uD589 \uC911\u2026`);
+        const lastRound = round >= cap - 1;
+        const fprompt = buildPrompt({
+          roster: st.roster,
+          conversation: st.conv,
+          speaker: facilitator,
+          nameOf,
+          preamble: facilitatorPreamble(facilitator, ids, nameOf, st.cwd) + (lastRound ? "\n(\uC774\uBC88\uC774 \uB9C8\uC9C0\uB9C9 \uC9C4\uD589 \uCC28\uB840\uC785\uB2C8\uB2E4 \u2014 \uC815\uB9AC\uD558\uACE0 \uB9C8\uBB34\uB9AC\uD558\uC138\uC694.)" : "")
+        });
+        const fwork = await runOneTurn(st, facilitator, fprompt);
+        if (fwork) st.conv.push({ who: facilitator, text: fwork });
+        if (st.pendingHuman.length) return;
+        if (!fwork) return;
+        const dir = parseFacilitatorDirective(fwork, ids, facilitator, nameOf);
+        if (dir.pattern === "none") return;
+        const targets = (dir.targets.length ? dir.targets : checked).filter(
+          (id) => id !== facilitator && st.roster.find((r) => r.id === id)?.checked
+        );
+        if (!targets.length) continue;
+        if (dir.pattern === "simul") {
+          await Promise.all(targets.map((id) => facilTurn(st, id, ids)));
+        } else {
+          for (const id of targets) {
+            if (st.pendingHuman.length) return;
+            await facilTurn(st, id, ids);
+          }
+        }
+      }
+      setStatus(st, "\uC9C4\uD589 \uD55C\uB3C4 \uB3C4\uB2EC \u2014 \uB9C8\uBB34\uB9AC");
+    }
     async function runLoop(st) {
       st.running = true;
       const ids = st.roster.map((x) => x.id);
       for (; ; ) {
         const scanFrom = st.conv.length;
-        const simul = st.mode === "simul";
-        if (simul) {
+        if (st.mode === "simul") {
           await driveSimul({
             roster: st.roster,
             conversation: st.conv,
             nameOf,
-            preamble: (s) => inviteePreamble(s, ids, nameOf, st.cwd, true),
+            preamble: (s) => inviteePreamble(s, ids, nameOf, st.cwd, "simul"),
             onTurnStart: () => setStatus(st, "\uB3D9\uC2DC \uC751\uB2F5 \uC911\u2026"),
             turn: (speaker, prompt) => runOneTurn(st, speaker, prompt)
           });
+        } else if (st.mode === "facil") {
+          await driveFacilitated(st, ids);
         } else {
           await driveSequential(st, ids);
         }
@@ -643,10 +734,12 @@ var main_default = {
           injectPending(st);
           continue;
         }
-        await resolveMentions(st, scanFrom, simul);
-        if (st.pendingHuman.length) {
-          injectPending(st);
-          continue;
+        if (st.mode !== "facil") {
+          await resolveMentions(st, scanFrom);
+          if (st.pendingHuman.length) {
+            injectPending(st);
+            continue;
+          }
         }
         break;
       }

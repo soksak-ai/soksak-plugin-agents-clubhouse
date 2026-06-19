@@ -15,8 +15,11 @@ import {
   detectMentions,
   driveExchange,
   driveSimul,
+  facilitatorPreamble,
   inviteePreamble,
+  parseFacilitatorDirective,
   participants,
+  pickFacilitator,
   type KibitzMode,
   type RosterEntry,
   type Utterance,
@@ -34,7 +37,7 @@ const ACTIVE_AGENTS = AGENTS.filter((a) => !a.hidden);
 const NAME: Record<string, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 const COLOR: Record<string, string> = Object.fromEntries(AGENTS.map((a) => [a.id, a.color]));
 const nameOf = (id: string): string => NAME[id] ?? id;
-const FREE_ROUNDS = 2; // free(자유) 모드 라운드 안전판(폭주 방지) — P5 설정화.
+const FACIL_MAX_ROUNDS = 6; // 진행 모드 하드 안전판 — 진행자가 안 멈추면 강제 마무리(무한 불가). 설정 override.
 
 const CSS = `
 .st{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
@@ -46,6 +49,9 @@ const CSS = `
 .st-tab.drag{opacity:.5}
 .st-tab .chk{width:13px;height:13px;border-radius:4px;border:1.5px solid currentColor;display:inline-flex;align-items:center;justify-content:center;font-size:10px;line-height:1}
 .st-tab .nm{font-weight:600}
+.st-crown{cursor:pointer;font-size:10px;opacity:.3;user-select:none;filter:grayscale(1)}
+.st-crown:hover{opacity:.7}
+.st-crown.on{opacity:1;filter:none}
 .st-kib{margin-left:4px;display:inline-flex;border-radius:8px;overflow:hidden;border:1px solid rgba(127,127,127,.28)}
 .st-kib button{appearance:none;border:0;background:transparent;color:inherit;opacity:.6;font:inherit;font-size:11px;padding:3px 9px;cursor:pointer}
 .st-kib button.on{opacity:1;background:rgba(127,127,127,.2);font-weight:700}
@@ -99,6 +105,7 @@ interface StudioState {
   conv: Utterance[];
   conns: Map<string, number>; // agentId → connId(영속 프로세스, 재사용)
   running: boolean;
+  facilitatorId: string; // 진행(facil) 모드의 진행자(👑) — 기본 첫 체크, 탭 👑 클릭으로 변경
   pendingHuman: string[]; // 진행 중 들어온 사람 참견 — 현재 턴 종결 후 세션 주입(취소-제거 아님)
   actives: Set<Current>; // 진행 중인 발화들(순차=최대 1, 동시=최대 N) — 중단·정리 대상
   cwd: string | undefined;
@@ -118,10 +125,12 @@ export default {
       (app.settings?.get("permissionPolicy") as string) || undefined;
     const settingMode = (): KibitzMode => {
       const v = app.settings?.get("kibitzDefault") as string;
-      return v === "free" || v === "simul" ? v : "turn";
+      return v === "facil" || v === "simul" ? v : "turn";
     };
     const settingDepthCap = (): number =>
       Math.max(1, Number(app.settings?.get("nameTriggerDepthCap")) || 4);
+    const settingFacilMax = (): number =>
+      Math.max(1, Number(app.settings?.get("facilMaxRounds")) || FACIL_MAX_ROUNDS);
     const projectCwd = (): string | undefined => app.project?.current?.()?.root;
 
     // 활성(마지막 마운트) Studio 뷰 — send 명령이 라이브 대화를 프로그램적으로 구동(노출 command E2E).
@@ -134,13 +143,13 @@ export default {
           "활성 Studio 뷰에 사람 메시지를 보낸다(textarea 전송과 동일 — 대화 구동/참견). 노출 command 자동화·E2E 용",
         params: {
           text: { type: "string", required: true, description: "보낼 메시지" },
-          mode: { type: "string", description: "turn|free|simul — 전송 전 모드 설정(E2E·자동화). 생략 시 유지" },
+          mode: { type: "string", description: "turn|facil|simul — 전송 전 모드 설정(E2E·자동화). 생략 시 유지" },
         },
         handler: async (p: any) => {
           const text = String(p?.text ?? "").trim();
           if (!text) return { ok: false, error: "text 필수" };
           if (!activeStudio) return { ok: false, error: "활성 Studio 뷰 없음(뷰를 먼저 여세요)" };
-          if (p?.mode === "turn" || p?.mode === "free" || p?.mode === "simul") {
+          if (p?.mode === "turn" || p?.mode === "facil" || p?.mode === "simul") {
             activeStudio.mode = p.mode; // 버튼 클릭과 동치(헤드리스 모드 전환)
           }
           onHuman(activeStudio, text);
@@ -161,6 +170,7 @@ export default {
           return {
             ok: true,
             mode: st.mode,
+            facilitator: st.facilitatorId, // 진행 모드 진행자(👑)
             running: st.running,
             conv: st.conv.length,
             pending: st.pendingHuman.length,
@@ -209,17 +219,15 @@ export default {
     ctx.subscriptions.push(
       app.commands.register("converse", {
         description:
-          "다중 에이전트 1교환 — agents(탭 순서)가 mode(turn/free)로 턴테이킹, cwd 에 실파일. 발화·쓴 파일 반환(헤드리스 E2E)",
+          "다중 에이전트 1교환 — agents(탭 순서)가 각 1회 턴테이킹, cwd 에 실파일. 발화·쓴 파일 반환(헤드리스 E2E)",
         params: {
           message: { type: "string", required: true, description: "사람 메시지(과제/프롬프트)" },
           agents: {
             type: "array",
             description:
-              "참여 순서 — preset id 문자열(claude,codex,gemini) 또는 {id,cmd,args}(헤드리스 E2E 런치). 기본 3 preset",
+              "참여 순서 — preset id 문자열(claude,codex,gemini) 또는 {id,cmd,args}(헤드리스 E2E 런치). 기본 활성 preset",
           },
-          mode: { type: "string", description: "turn(턴제) | free(자유). 기본 설정값" },
           cwd: { type: "string", description: "작업 디렉터리(실파일 검증 대상)" },
-          maxRounds: { type: "number", description: "free 모드 라운드 상한(기본 2)" },
         },
         handler: async (p: any) => {
           const raw: any[] =
@@ -231,7 +239,6 @@ export default {
               : { id: String(a.id), agent: undefined, cmd: a.cmd as string, args: a.args as string[] },
           );
           const roster: RosterEntry[] = specs.map((s) => ({ id: s.id, checked: true }));
-          const mode: KibitzMode = p.mode === "free" ? "free" : p.mode === "turn" ? "turn" : settingMode();
           const cwd = typeof p.cwd === "string" ? p.cwd : projectCwd();
           const conns = new Map<string, number>();
           const skipped: { id: string; error: string }[] = [];
@@ -261,16 +268,14 @@ export default {
             };
             await driveExchange({
               roster,
-              mode,
               conversation,
-              maxRounds: typeof p.maxRounds === "number" ? p.maxRounds : FREE_ROUNDS,
               nameOf,
-              preamble: (s) => inviteePreamble(s, rosterIds, nameOf, cwd),
+              preamble: (s) => inviteePreamble(s, rosterIds, nameOf, cwd, "turn"),
               turn: async (id, prompt) => (await askAgent(id, prompt)).trim(), // 미연결이면 throw → 이 발화 skip
               onUtterance: (u) => utterances.push(u),
             });
             const filesWritten = engine.diffWritten(before, await engine.snapshot(cwd));
-            return { ok: true, order: rosterIds, mode, utterances, filesWritten, skipped };
+            return { ok: true, order: rosterIds, utterances, filesWritten, skipped };
           } catch (e) {
             return { ok: false, error: String(e) };
           } finally {
@@ -333,6 +338,7 @@ export default {
         conv: [],
         conns: new Map(),
         running: false,
+        facilitatorId: ACTIVE_AGENTS[0]?.id ?? "", // 기본 진행자 = 첫 활성 에이전트
         pendingHuman: [],
         actives: new Set(),
         cwd: projectCwd(),
@@ -345,6 +351,7 @@ export default {
 
       const kib = kibitzToggle(st.mode, (m) => {
         st.mode = m;
+        renderTabs(st, tabsEl); // 진행 모드 진입/이탈 시 👑 표시 갱신
       });
       renderTabs(st, tabsEl);
       bar.append(elText("b", "Studio"), tabsEl, kib, status);
@@ -366,7 +373,7 @@ export default {
       setStatus(st, "대기");
     }
 
-    // 참견 모드 토글 — turn(턴제) / free(자유).
+    // 대화 모드 토글 — turn(순차) / facil(진행) / simul(동시).
     function kibitzToggle(initial: KibitzMode, onChange: (m: KibitzMode) => void): HTMLElement {
       const wrap = el("div", "st-kib");
       const mk = (m: KibitzMode, label: string) => {
@@ -381,7 +388,7 @@ export default {
         });
         return b;
       };
-      wrap.append(mk("turn", "턴제"), mk("free", "자유"), mk("simul", "동시"));
+      wrap.append(mk("turn", "순차"), mk("facil", "진행"), mk("simul", "동시"));
       return wrap;
     }
 
@@ -398,6 +405,17 @@ export default {
         const nm = elText("span", a?.label ?? entry.id, "nm");
         nm.style.color = "var(--fg,#ddd)";
         chip.append(chk, nm);
+        // 진행 모드 — 체크된 탭에 👑(진행자 지정). 현 진행자만 채워진 왕관. 클릭=지정(체크 토글과 분리).
+        if (st.mode === "facil" && entry.checked) {
+          const crown = elText("span", "👑", "st-crown" + (entry.id === st.facilitatorId ? " on" : ""));
+          crown.title = "진행자로 지정";
+          crown.addEventListener("click", (e) => {
+            e.stopPropagation(); // 체크 토글 막고 진행자만 변경
+            st.facilitatorId = entry.id;
+            renderTabs(st, tabsEl);
+          });
+          chip.append(crown);
+        }
         chip.addEventListener("click", () => {
           entry.checked = !entry.checked;
           renderTabs(st, tabsEl);
@@ -527,7 +545,7 @@ export default {
 
     // @멘션 해소 — 주 구동 뒤, 새 발화에서 '@이름' 지목을 수집해 그 동료를 발화시킨다(체크 안 된 구경꾼도 깨움).
     // 지목된 발화가 또 누굴 부르면 연쇄. depthCap(설정 nameTriggerDepthCap) 안전판. 참견 들어오면 즉시 양보.
-    async function resolveMentions(st: StudioState, scanFrom: number, simul: boolean) {
+    async function resolveMentions(st: StudioState, scanFrom: number) {
       const ids = st.roster.map((x) => x.id);
       let from = scanFrom;
       for (let depth = 0; depth < settingDepthCap(); depth++) {
@@ -548,7 +566,7 @@ export default {
             conversation: st.conv,
             speaker: id,
             nameOf,
-            preamble: `${inviteePreamble(id, ids, nameOf, st.cwd, simul)}\n(당신이 @${nameOf(id)} 으로 지목되었습니다 — 위 대화에 이어 답하세요.)`,
+            preamble: `${inviteePreamble(id, ids, nameOf, st.cwd, st.mode)}\n(당신이 @${nameOf(id)} 으로 지목되었습니다 — 위 대화에 이어 답하세요.)`,
           });
           const work = await runOneTurn(st, id, prompt);
           if (work) st.conv.push({ who: id, text: work });
@@ -556,15 +574,12 @@ export default {
       }
     }
 
-    // 순차 구동(턴/자유) — 탭 순서대로(turn=각 1회, free=라운드 반복). 매 발화 전후 참견(pendingHuman) 체크 시
+    // 순차(turn) 구동 — 탭 순서대로 각 1회(라운드로빈 폐기 — 한 바퀴). 매 발화 전후 참견(pendingHuman) 체크 시
     // 라운드 중단(상위가 사람 입력 주입·재구동). 라운드 중 체크 해제된 에이전트(오류 자동 드롭·수동)는 건너뜀.
     async function driveSequential(st: StudioState, ids: string[]) {
       const parts = participants(st.roster);
-      if (!parts.length) return;
-      const cap = st.mode === "free" ? Math.max(1, FREE_ROUNDS) * parts.length : parts.length;
-      for (let i = 0; i < cap; i++) {
+      for (const speaker of parts) {
         if (st.pendingHuman.length) return; // 참견 — 라운드 중단
-        const speaker = parts[i % parts.length];
         if (!st.roster.find((r) => r.id === speaker)?.checked) continue; // 중도 드롭 — 건너뜀
         setStatus(st, `${nameOf(speaker)} 응답 중…`);
         const prompt = buildPrompt({
@@ -572,7 +587,7 @@ export default {
           conversation: st.conv,
           speaker,
           nameOf,
-          preamble: inviteePreamble(speaker, ids, nameOf, st.cwd, false),
+          preamble: inviteePreamble(speaker, ids, nameOf, st.cwd, "turn"),
         });
         const work = await runOneTurn(st, speaker, prompt);
         if (work) st.conv.push({ who: speaker, text: work });
@@ -580,34 +595,102 @@ export default {
       }
     }
 
-    // 라이브 구동 — 한 라운드(turn/free=순차, simul=병렬) → @멘션 해소. 참견(pendingHuman)이 들어오면 부분응답
-    // 종결 직후 사람 입력을 주입하고 새 라운드 재구동. 참견 없으면 1라운드로 종료(사람 입력 대기).
+    // 한 동료 발화 — 진행자가 호출하는 단위(facil). 체크 확인·프롬프트·runOneTurn·conv push.
+    async function facilTurn(st: StudioState, id: string, ids: string[]) {
+      if (!st.roster.find((r) => r.id === id)?.checked) return;
+      setStatus(st, `${nameOf(id)} 응답 중…`);
+      const prompt = buildPrompt({
+        roster: st.roster,
+        conversation: st.conv,
+        speaker: id,
+        nameOf,
+        preamble: inviteePreamble(id, ids, nameOf, st.cwd, "facil"),
+      });
+      const w = await runOneTurn(st, id, prompt);
+      if (w) st.conv.push({ who: id, text: w });
+    }
+
+    // 진행(facil) 구동 — 진행자가 사람의 단일 창구. 매 LOOP: [진행자 턴] → 지시 파싱 → 동료를 동시/순차/선택으로
+    // 호출 → await 완료(=stall) → 진행자 복귀. 지시 없음(none)=마무리 신호 → 종료. 하드 cap(settingFacilMax).
+    async function driveFacilitated(st: StudioState, ids: string[]) {
+      const checked = participants(st.roster);
+      if (!checked.length) return;
+      // 진행자 = 명시 facilitatorId 가 체크돼 있으면 그것, 아니면 첫 체크.
+      const facilitator = checked.includes(st.facilitatorId)
+        ? st.facilitatorId
+        : (pickFacilitator(st.roster) ?? checked[0]);
+      const cap = settingFacilMax();
+      for (let round = 0; round < cap; round++) {
+        if (st.pendingHuman.length) return; // 참견 — 상위가 주입·재구동
+        // [진행자 턴]
+        setStatus(st, `${nameOf(facilitator)} 진행 중…`);
+        const lastRound = round >= cap - 1;
+        const fprompt = buildPrompt({
+          roster: st.roster,
+          conversation: st.conv,
+          speaker: facilitator,
+          nameOf,
+          preamble:
+            facilitatorPreamble(facilitator, ids, nameOf, st.cwd) +
+            (lastRound ? "\n(이번이 마지막 진행 차례입니다 — 정리하고 마무리하세요.)" : ""),
+        });
+        const fwork = await runOneTurn(st, facilitator, fprompt);
+        if (fwork) st.conv.push({ who: facilitator, text: fwork });
+        if (st.pendingHuman.length) return;
+        if (!fwork) return; // 진행자 침묵/실패 → 종료
+        // [지시 파싱]
+        const dir = parseFacilitatorDirective(fwork, ids, facilitator, nameOf);
+        if (dir.pattern === "none") return; // 지시 없음 = 마무리 → 휴면
+        const targets = (dir.targets.length ? dir.targets : checked).filter(
+          (id) => id !== facilitator && st.roster.find((r) => r.id === id)?.checked,
+        );
+        if (!targets.length) continue; // 부를 동료 없음 → 다음 진행자 턴
+        // [동료 응답] 동시=병렬 / 순차·선택=순서대로
+        if (dir.pattern === "simul") {
+          await Promise.all(targets.map((id) => facilTurn(st, id, ids)));
+        } else {
+          for (const id of targets) {
+            if (st.pendingHuman.length) return;
+            await facilTurn(st, id, ids);
+          }
+        }
+        // stall(동료 응답 완료) → 다음 LOOP(진행자 복귀·재판단)
+      }
+      setStatus(st, "진행 한도 도달 — 마무리"); // 하드 cap 도달 → 종료
+    }
+
+    // 라이브 구동 — 모드별 한 구동(turn=순차 1라운드 / simul=병렬 1라운드 / facil=진행자 LOOP). turn·simul 뒤엔
+    // @멘션 해소(facil 은 진행자가 조율하므로 별도 @해소 안 함). 참견(pendingHuman)이 들어오면 부분응답 종결 직후
+    // 사람 입력을 주입하고 재구동. 참견 없으면 종료(사람 입력 대기).
     async function runLoop(st: StudioState) {
       st.running = true;
       const ids = st.roster.map((x) => x.id);
       for (;;) {
         const scanFrom = st.conv.length;
-        const simul = st.mode === "simul";
-        if (simul) {
+        if (st.mode === "simul") {
           await driveSimul({
             roster: st.roster,
             conversation: st.conv,
             nameOf,
-            preamble: (s) => inviteePreamble(s, ids, nameOf, st.cwd, true),
+            preamble: (s) => inviteePreamble(s, ids, nameOf, st.cwd, "simul"),
             onTurnStart: () => setStatus(st, "동시 응답 중…"),
             turn: (speaker, prompt) => runOneTurn(st, speaker, prompt),
           });
+        } else if (st.mode === "facil") {
+          await driveFacilitated(st, ids);
         } else {
           await driveSequential(st, ids);
         }
         if (st.pendingHuman.length) {
           injectPending(st); // 참견 — 부분응답 종결 뒤 사람 입력 주입(순서: 발화 → 사람)
-          continue; // 새 라운드 재구동
+          continue; // 재구동
         }
-        await resolveMentions(st, scanFrom, simul); // @지목 연쇄
-        if (st.pendingHuman.length) {
-          injectPending(st);
-          continue;
+        if (st.mode !== "facil") {
+          await resolveMentions(st, scanFrom); // @지목 연쇄(진행 모드는 진행자가 조율)
+          if (st.pendingHuman.length) {
+            injectPending(st);
+            continue;
+          }
         }
         break; // 참견 없음 — 종료
       }
