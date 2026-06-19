@@ -44,9 +44,9 @@ const CSS = `
 .st-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto;flex-wrap:wrap}
 .st-bar b{font-weight:700;letter-spacing:.02em}
 .st-tabs{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-.st-tab{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:8px;border:1px solid rgba(127,127,127,.28);background:rgba(127,127,127,.08);cursor:grab;font-size:12px;user-select:none;transition:opacity .12s,border-color .12s}
+.st-tab{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:8px;border:1px solid rgba(127,127,127,.28);background:rgba(127,127,127,.08);cursor:grab;font-size:12px;user-select:none;touch-action:none;transition:opacity .12s,border-color .12s}
 .st-tab.off{opacity:.4}
-.st-tab.drag{opacity:.5}
+.st-tab.drag{cursor:grabbing;opacity:.95;border-color:currentColor;box-shadow:0 3px 10px rgba(0,0,0,.35);transform:scale(1.06);position:relative;z-index:3}
 .st-tab .chk{width:13px;height:13px;border-radius:4px;border:1.5px solid currentColor;display:inline-flex;align-items:center;justify-content:center;font-size:10px;line-height:1}
 .st-tab .nm{font-weight:600}
 .st-crown{cursor:pointer;font-size:10px;opacity:.3;user-select:none;filter:grayscale(1)}
@@ -399,45 +399,66 @@ export default {
     // 로스터 탭 — 체크박스(참여) + 드래그(순서=턴 순서). 브랜드 색.
     function renderTabs(st: StudioState, tabsEl: HTMLElement) {
       tabsEl.replaceChildren();
-      st.roster.forEach((entry, idx) => {
+      st.roster.forEach((entry) => {
         const a = AGENTS.find((x) => x.id === entry.id);
         const chip = el("div", "st-tab" + (entry.checked ? "" : " off"));
         chip.style.color = a?.color ?? "#888";
-        chip.draggable = true;
+        chip.dataset.id = entry.id; // pointer reorder 의 드롭 타겟 식별
         const chk = el("span", "chk");
         chk.textContent = entry.checked ? "✓" : "";
         const nm = elText("span", a?.label ?? entry.id, "nm");
         nm.style.color = "var(--fg,#ddd)";
         chip.append(chk, nm);
-        // 진행 모드 — 체크된 탭에 👑(진행자 지정). 현 진행자만 채워진 왕관. 클릭=지정(체크 토글과 분리).
+        // 진행 모드 — 체크된 탭에 👑(진행자 지정). 현 진행자만 채워진 왕관(시각). 지정은 아래 pointer 처리.
         if (st.mode === "facil" && entry.checked) {
           const crown = elText("span", "👑", "st-crown" + (entry.id === st.facilitatorId ? " on" : ""));
           crown.title = "진행자로 지정";
-          crown.addEventListener("click", (e) => {
-            e.stopPropagation(); // 체크 토글 막고 진행자만 변경
-            st.facilitatorId = entry.id;
-            renderTabs(st, tabsEl);
-          });
           chip.append(crown);
         }
-        chip.addEventListener("click", () => {
-          entry.checked = !entry.checked;
-          renderTabs(st, tabsEl);
-        });
-        // 드래그 정렬 — 탭 순서 = 턴 순서.
-        chip.addEventListener("dragstart", (e) => {
-          chip.classList.add("drag");
-          e.dataTransfer?.setData("text/plain", String(idx));
-        });
-        chip.addEventListener("dragend", () => chip.classList.remove("drag"));
-        chip.addEventListener("dragover", (e) => e.preventDefault());
-        chip.addEventListener("drop", (e) => {
+        // 상호작용 — element setPointerCapture 가 이 웹뷰에서 불안정해 드래그가 "탭"으로 처리됐다(체크 토글 오작동).
+        //   코어처럼 pointerdown 후 **window** 레벨 pointermove/up 으로 확실히 추적. 이동 있음=라이브 reorder(토글 안 함),
+        //   이동 없음=탭(👑 위면 진행자 지정, 아니면 체크 토글).
+        chip.addEventListener("pointerdown", (e) => {
+          if ((e as PointerEvent).button !== 0) return;
           e.preventDefault();
-          const from = Number(e.dataTransfer?.getData("text/plain"));
-          if (Number.isNaN(from) || from === idx) return;
-          const [moved] = st.roster.splice(from, 1);
-          st.roster.splice(idx, 0, moved);
-          renderTabs(st, tabsEl);
+          const startX = (e as PointerEvent).clientX;
+          let moved = false;
+          const onMove = (ev: PointerEvent) => {
+            if (!moved && Math.abs(ev.clientX - startX) > 5) {
+              moved = true;
+              chip.classList.add("drag");
+            }
+            if (!moved) return;
+            // 삽입 위치 = 중심이 포인터보다 오른쪽인 첫 형제 앞(없으면 맨 뒤). 갭 무관, 라이브로 칩이 따라 이동.
+            let ref: Element | null = null;
+            for (const s of Array.from(tabsEl.children)) {
+              if (s === chip) continue;
+              const r = s.getBoundingClientRect();
+              if (ev.clientX < r.left + r.width / 2) {
+                ref = s;
+                break;
+              }
+            }
+            if (chip.nextSibling !== ref) tabsEl.insertBefore(chip, ref);
+          };
+          const onUp = (ev: PointerEvent) => {
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", onUp);
+            chip.classList.remove("drag");
+            if (moved) {
+              // 드래그 — 라이브로 옮긴 DOM 순서를 st.roster 에 반영(체크 토글 절대 안 함).
+              const order = (Array.from(tabsEl.children) as HTMLElement[]).map((c) => c.dataset.id ?? "");
+              st.roster.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+            } else {
+              // 탭(이동 없음) — 👑 위면 진행자 지정, 아니면 체크 토글.
+              const under = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+              if (under?.closest(".st-crown") && st.mode === "facil") st.facilitatorId = entry.id;
+              else entry.checked = !entry.checked;
+            }
+            renderTabs(st, tabsEl);
+          };
+          window.addEventListener("pointermove", onMove);
+          window.addEventListener("pointerup", onUp);
         });
         tabsEl.appendChild(chip);
       });
