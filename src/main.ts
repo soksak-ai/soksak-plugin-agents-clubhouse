@@ -111,6 +111,7 @@ interface StudioState {
   cwd: string | undefined;
   msgs: HTMLElement;
   tabsEl: HTMLElement; // 로스터 탭 컨테이너 — 세션 오류 시 자동 체크 해제 후 재렌더
+  kibEl: HTMLElement; // 모드 토글(순차/진행/동시) 컨테이너 — setMode 가 버튼 하이라이트 동기화
   status: HTMLElement;
 }
 
@@ -150,7 +151,7 @@ export default {
           if (!text) return { ok: false, error: "text 필수" };
           if (!activeStudio) return { ok: false, error: "활성 Studio 뷰 없음(뷰를 먼저 여세요)" };
           if (p?.mode === "turn" || p?.mode === "facil" || p?.mode === "simul") {
-            activeStudio.mode = p.mode; // 버튼 클릭과 동치(헤드리스 모드 전환)
+            setMode(activeStudio, p.mode); // 버튼 클릭과 동치 — 하이라이트·👑 동기화
           }
           onHuman(activeStudio, text);
           return { ok: true, sent: text, mode: activeStudio.mode, running: activeStudio.running };
@@ -322,6 +323,7 @@ export default {
     function buildStudio(container: HTMLElement, root: HTMLElement) {
       const bar = el("div", "st-bar");
       const tabsEl = el("div", "st-tabs");
+      const kibEl = el("div", "st-kib");
       const status = el("div", "st-status");
       const msgs = el("div", "st-msgs");
       const inrow = el("div", "st-in");
@@ -344,17 +346,15 @@ export default {
         cwd: projectCwd(),
         msgs,
         tabsEl,
+        kibEl,
         status,
       };
       states.set(container, st);
       activeStudio = st; // 라이브 send 명령의 타겟(마지막 마운트 = 활성)
 
-      const kib = kibitzToggle(st.mode, (m) => {
-        st.mode = m;
-        renderTabs(st, tabsEl); // 진행 모드 진입/이탈 시 👑 표시 갱신
-      });
+      buildKibitz(st); // 모드 버튼(순차/진행/동시) — 클릭은 setMode 통과
       renderTabs(st, tabsEl);
-      bar.append(elText("b", "Studio"), tabsEl, kib, status);
+      bar.append(elText("b", "Studio"), tabsEl, kibEl, status);
       root.append(bar, msgs, inrow);
 
       const doSend = () => {
@@ -373,23 +373,27 @@ export default {
       setStatus(st, "대기");
     }
 
-    // 대화 모드 토글 — turn(순차) / facil(진행) / simul(동시).
-    function kibitzToggle(initial: KibitzMode, onChange: (m: KibitzMode) => void): HTMLElement {
-      const wrap = el("div", "st-kib");
+    // 모드 변경 단일 경로 — 버튼 클릭·send 명령 모두 여기로. st.mode + 버튼 하이라이트 + 탭(👑) 을 함께 동기화.
+    function setMode(st: StudioState, m: KibitzMode) {
+      st.mode = m;
+      for (const c of Array.from(st.kibEl.children) as HTMLElement[]) {
+        c.classList.toggle("on", c.dataset.mode === m);
+      }
+      renderTabs(st, st.tabsEl); // 진행 모드 진입/이탈 시 👑 표시 갱신
+    }
+
+    // 모드 버튼(순차/진행/동시) — st.kibEl 에 채운다. 클릭은 setMode 통과(하이라이트·👑 동기화).
+    function buildKibitz(st: StudioState) {
       const mk = (m: KibitzMode, label: string) => {
         const b = document.createElement("button");
         b.type = "button";
         b.textContent = label;
-        b.classList.toggle("on", m === initial);
-        b.addEventListener("click", () => {
-          for (const c of wrap.children) c.classList.remove("on");
-          b.classList.add("on");
-          onChange(m);
-        });
+        b.dataset.mode = m;
+        b.classList.toggle("on", m === st.mode);
+        b.addEventListener("click", () => setMode(st, m));
         return b;
       };
-      wrap.append(mk("turn", "순차"), mk("facil", "진행"), mk("simul", "동시"));
-      return wrap;
+      st.kibEl.append(mk("turn", "순차"), mk("facil", "진행"), mk("simul", "동시"));
     }
 
     // 로스터 탭 — 체크박스(참여) + 드래그(순서=턴 순서). 브랜드 색.

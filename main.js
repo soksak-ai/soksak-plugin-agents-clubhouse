@@ -272,7 +272,7 @@ var main_default = {
           if (!text) return { ok: false, error: "text \uD544\uC218" };
           if (!activeStudio) return { ok: false, error: "\uD65C\uC131 Studio \uBDF0 \uC5C6\uC74C(\uBDF0\uB97C \uBA3C\uC800 \uC5EC\uC138\uC694)" };
           if (p?.mode === "turn" || p?.mode === "facil" || p?.mode === "simul") {
-            activeStudio.mode = p.mode;
+            setMode(activeStudio, p.mode);
           }
           onHuman(activeStudio, text);
           return { ok: true, sent: text, mode: activeStudio.mode, running: activeStudio.running };
@@ -423,6 +423,7 @@ var main_default = {
     function buildStudio(container, root) {
       const bar = el("div", "st-bar");
       const tabsEl = el("div", "st-tabs");
+      const kibEl = el("div", "st-kib");
       const status = el("div", "st-status");
       const msgs = el("div", "st-msgs");
       const inrow = el("div", "st-in");
@@ -445,16 +446,14 @@ var main_default = {
         cwd: projectCwd(),
         msgs,
         tabsEl,
+        kibEl,
         status
       };
       states.set(container, st);
       activeStudio = st;
-      const kib = kibitzToggle(st.mode, (m) => {
-        st.mode = m;
-        renderTabs(st, tabsEl);
-      });
+      buildKibitz(st);
       renderTabs(st, tabsEl);
-      bar.append(elText("b", "Studio"), tabsEl, kib, status);
+      bar.append(elText("b", "Studio"), tabsEl, kibEl, status);
       root.append(bar, msgs, inrow);
       const doSend = () => {
         const t = ta.value.trim();
@@ -471,22 +470,24 @@ var main_default = {
       });
       setStatus(st, "\uB300\uAE30");
     }
-    function kibitzToggle(initial, onChange) {
-      const wrap = el("div", "st-kib");
+    function setMode(st, m) {
+      st.mode = m;
+      for (const c of Array.from(st.kibEl.children)) {
+        c.classList.toggle("on", c.dataset.mode === m);
+      }
+      renderTabs(st, st.tabsEl);
+    }
+    function buildKibitz(st) {
       const mk = (m, label) => {
         const b = document.createElement("button");
         b.type = "button";
         b.textContent = label;
-        b.classList.toggle("on", m === initial);
-        b.addEventListener("click", () => {
-          for (const c of wrap.children) c.classList.remove("on");
-          b.classList.add("on");
-          onChange(m);
-        });
+        b.dataset.mode = m;
+        b.classList.toggle("on", m === st.mode);
+        b.addEventListener("click", () => setMode(st, m));
         return b;
       };
-      wrap.append(mk("turn", "\uC21C\uCC28"), mk("facil", "\uC9C4\uD589"), mk("simul", "\uB3D9\uC2DC"));
-      return wrap;
+      st.kibEl.append(mk("turn", "\uC21C\uCC28"), mk("facil", "\uC9C4\uD589"), mk("simul", "\uB3D9\uC2DC"));
     }
     function renderTabs(st, tabsEl) {
       tabsEl.replaceChildren();
