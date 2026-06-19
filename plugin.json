@@ -65,7 +65,10 @@
     "nodes": [
       { "id": "send", "description": "전송 버튼" },
       { "id": "input", "description": "메시지 입력" },
-      { "id": "tab", "description": "에이전트 탭(체크·드래그)" }
+      { "id": "tab", "description": "에이전트 탭(체크·드래그)" },
+      { "id": "mode", "description": "대화 모드 버튼(진행/순차/동시)" },
+      { "id": "crown", "description": "진행자 지정(👑, 진행 모드)" },
+      { "id": "modal", "description": "참견 모달 버튼(지금 끊기/끝나면/취소)" }
     ],
     "programs": [
       {

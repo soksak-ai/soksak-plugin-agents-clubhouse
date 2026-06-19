@@ -250,6 +250,16 @@ var CSS = `
 .st-in textarea{flex:1;resize:none;background:rgba(127,127,127,.1);color:inherit;border:1px solid rgba(127,127,127,.25);border-radius:7px;padding:7px 9px;font:inherit;min-height:20px;max-height:120px}
 .st-in button{background:#2d6cdf;color:#fff;border:0;border-radius:7px;padding:0 14px;cursor:pointer;font:inherit;font-weight:600}
 .st-cut{font-weight:400;opacity:.7;font-size:9px;font-style:italic} /* \uCC38\uACAC\uC73C\uB85C \uC911\uB2E8\uB41C \uBD80\uBD84\uC751\uB2F5 \uD45C\uC2DD */
+.st-row.queued .st-bubble{opacity:.45;border:1px dashed rgba(255,255,255,.4)} /* \uB300\uAE30 \uC911 \uC0AC\uB78C \uC785\uB825(\uBBF8\uBC18\uC601) */
+.st-queued-tag{font-weight:400;opacity:.7;font-size:10px;font-style:italic}
+.st-modal{position:absolute;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50}
+.st-modal-box{background:var(--bg2,#262626);border:1px solid rgba(127,127,127,.4);border-radius:12px;padding:16px 18px;max-width:300px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+.st-modal-title{font-weight:700;font-size:13px;margin-bottom:4px}
+.st-modal-msg{font-size:12px;color:var(--fg3,#aaa);margin-bottom:14px;line-height:1.4}
+.st-modal-btns{display:flex;gap:6px;flex-wrap:wrap}
+.st-modal-btn{flex:1;min-width:74px;appearance:none;border:1px solid rgba(127,127,127,.35);background:rgba(127,127,127,.1);color:inherit;border-radius:7px;padding:7px 8px;font:inherit;font-size:12px;cursor:pointer}
+.st-modal-btn:hover{background:rgba(127,127,127,.2)}
+.st-modal-btn.primary{background:#2d6cdf;border-color:#2d6cdf;color:#fff;font-weight:600}
 `;
 var main_default = {
   activate(ctx) {
@@ -270,7 +280,8 @@ var main_default = {
         description: "\uD65C\uC131 Studio \uBDF0\uC5D0 \uC0AC\uB78C \uBA54\uC2DC\uC9C0\uB97C \uBCF4\uB0B8\uB2E4(textarea \uC804\uC1A1\uACFC \uB3D9\uC77C \u2014 \uB300\uD654 \uAD6C\uB3D9/\uCC38\uACAC). \uB178\uCD9C command \uC790\uB3D9\uD654\xB7E2E \uC6A9",
         params: {
           text: { type: "string", required: true, description: "\uBCF4\uB0BC \uBA54\uC2DC\uC9C0" },
-          mode: { type: "string", description: "turn|facil|simul \u2014 \uC804\uC1A1 \uC804 \uBAA8\uB4DC \uC124\uC815(E2E\xB7\uC790\uB3D9\uD654). \uC0DD\uB7B5 \uC2DC \uC720\uC9C0" }
+          mode: { type: "string", description: "turn|facil|simul \u2014 \uC804\uC1A1 \uC804 \uBAA8\uB4DC \uC124\uC815(E2E\xB7\uC790\uB3D9\uD654). \uC0DD\uB7B5 \uC2DC \uC720\uC9C0" },
+          cut: { type: "boolean", description: "true=\uCC38\uACAC \uC2DC ask/wait \uBB34\uC2DC\uD558\uACE0 \uC989\uC2DC \uB04A\uAE30(E2E \uACB0\uC815\uB860)" }
         },
         handler: async (p) => {
           const text = String(p?.text ?? "").trim();
@@ -279,7 +290,7 @@ var main_default = {
           if (p?.mode === "turn" || p?.mode === "facil" || p?.mode === "simul") {
             setMode(activeStudio, p.mode);
           }
-          onHuman(activeStudio, text);
+          onHuman(activeStudio, text, p?.cut === true);
           return { ok: true, sent: text, mode: activeStudio.mode, running: activeStudio.running };
         }
       })
@@ -469,7 +480,10 @@ var main_default = {
         if (!t) return;
         ta.value = "";
         hideMention();
-        onHuman(st, t);
+        onHuman(st, t, false, () => {
+          ta.value = t;
+          ta.focus();
+        });
       };
       let menTokens = [];
       let menActive = -1;
@@ -562,6 +576,7 @@ var main_default = {
         b.type = "button";
         b.textContent = label;
         b.dataset.mode = m;
+        b.dataset.node = `mode/${m}`;
         b.classList.toggle("on", m === st.mode);
         b.addEventListener("click", () => setMode(st, m));
         return b;
@@ -584,6 +599,12 @@ var main_default = {
         if (st.mode === "facil" && entry.checked) {
           const crown = elText("span", "\u{1F451}", "st-crown" + (entry.id === st.facilitatorId ? " on" : ""));
           crown.title = "\uC9C4\uD589\uC790\uB85C \uC9C0\uC815";
+          crown.dataset.node = `crown/${entry.id}`;
+          crown.addEventListener("click", (e) => {
+            e.stopPropagation();
+            st.facilitatorId = entry.id;
+            renderTabs(st, st.tabsEl);
+          });
           chip.append(crown);
         }
         chip.addEventListener("pointerdown", (e) => {
@@ -631,18 +652,34 @@ var main_default = {
     function setStatus(st, t) {
       st.status.textContent = t;
     }
-    function onHuman(st, text) {
+    function onHuman(st, text, forceCut, onCancel) {
       if (!st.running) {
         st.conv.push({ who: "human", text });
         renderUser(st, text);
         void runLoop(st);
         return;
       }
-      st.pendingHuman.push(text);
-      for (const c of st.actives) engine.cancel(c.connId, c.sessionId);
-      setStatus(st, "\uCC38\uACAC \u2014 \uD604\uC7AC \uBC1C\uD654 \uC885\uACB0 \uD6C4 \uBC18\uC601");
+      const apply = (kind) => {
+        st.pendingHuman.push(text);
+        if (kind === "cut") {
+          for (const c of st.actives) engine.cancel(c.connId, c.sessionId);
+          setStatus(st, "\uCC38\uACAC \u2014 \uD604\uC7AC \uBC1C\uD654 \uC885\uACB0 \uD6C4 \uBC18\uC601");
+        } else {
+          renderQueued(st);
+          setStatus(st, "\uB300\uAE30 \uC911 \u2014 \uD604\uC7AC \uB300\uD654\uAC00 \uB05D\uB098\uBA74 \uBC18\uC601");
+        }
+      };
+      if (forceCut) return apply("cut");
+      const who = [...st.actives].map((c) => nameOf(c.agentId)).join(", ") || "\uB300\uD654";
+      showInterjectAlert(st, who, (choice) => {
+        if (choice === "cut") apply("cut");
+        else if (choice === "wait") apply("wait");
+        else onCancel?.();
+      });
     }
     function injectPending(st) {
+      clearQueued(st);
+      clearModal(st);
       for (const t of st.pendingHuman) {
         st.conv.push({ who: "human", text: t });
         renderUser(st, t);
@@ -894,6 +931,49 @@ var main_default = {
       row.append(who, bubble(text));
       st.msgs.appendChild(row);
       scroll(st);
+    }
+    function renderQueued(st) {
+      clearQueued(st);
+      const last = st.pendingHuman[st.pendingHuman.length - 1] ?? "";
+      const row = el("div", "st-row user queued");
+      row.dataset.queued = "1";
+      const who = el("div", "st-who");
+      who.append(elText("span", "\uB098", "st-who-name"), elText("span", " \xB7 \uB300\uAE30 \uC911", "st-queued-tag"));
+      row.append(who, bubble(last));
+      st.msgs.appendChild(row);
+      scroll(st);
+    }
+    function clearQueued(st) {
+      st.msgs.querySelectorAll('.st-row.queued[data-queued="1"]').forEach((n) => n.remove());
+    }
+    function clearModal(st) {
+      st.msgs.parentElement?.querySelectorAll(".st-modal").forEach((n) => n.remove());
+    }
+    function showInterjectAlert(st, who, cb) {
+      const root = st.msgs.parentElement ?? st.msgs;
+      st.msgs.parentElement?.querySelectorAll(".st-modal").forEach((n) => n.remove());
+      const back = el("div", "st-modal");
+      const box = el("div", "st-modal-box");
+      box.append(elText("div", `${who} \uB9D0\uD558\uB294 \uC911`, "st-modal-title"));
+      box.append(elText("div", "\uC9C0\uAE08 \uB07C\uC5B4\uB4E4\uAE4C\uC694, \uB05D\uB098\uBA74 \uB123\uC744\uAE4C\uC694?", "st-modal-msg"));
+      const btns = el("div", "st-modal-btns");
+      const close = (c) => {
+        back.remove();
+        cb(c);
+      };
+      const mk = (label, c, primary) => {
+        const b = elText("button", label, "st-modal-btn" + (primary ? " primary" : ""));
+        b.dataset.node = `modal/${c}`;
+        b.addEventListener("click", () => close(c));
+        return b;
+      };
+      btns.append(mk("\uC9C0\uAE08 \uB04A\uAE30", "cut", true), mk("\uB05D\uB098\uBA74 \uB123\uAE30", "wait"), mk("\uCDE8\uC18C", "cancel"));
+      box.append(btns);
+      back.append(box);
+      back.addEventListener("click", (e) => {
+        if (e.target === back) close("cancel");
+      });
+      root.appendChild(back);
     }
     function renderTurnRow(st, agentId) {
       const row = el("div", "st-row assistant");

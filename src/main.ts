@@ -85,6 +85,16 @@ const CSS = `
 .st-in textarea{flex:1;resize:none;background:rgba(127,127,127,.1);color:inherit;border:1px solid rgba(127,127,127,.25);border-radius:7px;padding:7px 9px;font:inherit;min-height:20px;max-height:120px}
 .st-in button{background:#2d6cdf;color:#fff;border:0;border-radius:7px;padding:0 14px;cursor:pointer;font:inherit;font-weight:600}
 .st-cut{font-weight:400;opacity:.7;font-size:9px;font-style:italic} /* 참견으로 중단된 부분응답 표식 */
+.st-row.queued .st-bubble{opacity:.45;border:1px dashed rgba(255,255,255,.4)} /* 대기 중 사람 입력(미반영) */
+.st-queued-tag{font-weight:400;opacity:.7;font-size:10px;font-style:italic}
+.st-modal{position:absolute;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50}
+.st-modal-box{background:var(--bg2,#262626);border:1px solid rgba(127,127,127,.4);border-radius:12px;padding:16px 18px;max-width:300px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+.st-modal-title{font-weight:700;font-size:13px;margin-bottom:4px}
+.st-modal-msg{font-size:12px;color:var(--fg3,#aaa);margin-bottom:14px;line-height:1.4}
+.st-modal-btns{display:flex;gap:6px;flex-wrap:wrap}
+.st-modal-btn{flex:1;min-width:74px;appearance:none;border:1px solid rgba(127,127,127,.35);background:rgba(127,127,127,.1);color:inherit;border-radius:7px;padding:7px 8px;font:inherit;font-size:12px;cursor:pointer}
+.st-modal-btn:hover{background:rgba(127,127,127,.2)}
+.st-modal-btn.primary{background:#2d6cdf;border-color:#2d6cdf;color:#fff;font-weight:600}
 `;
 
 interface TurnRow {
@@ -150,6 +160,7 @@ export default {
         params: {
           text: { type: "string", required: true, description: "보낼 메시지" },
           mode: { type: "string", description: "turn|facil|simul — 전송 전 모드 설정(E2E·자동화). 생략 시 유지" },
+          cut: { type: "boolean", description: "true=참견 시 ask/wait 무시하고 즉시 끊기(E2E 결정론)" },
         },
         handler: async (p: any) => {
           const text = String(p?.text ?? "").trim();
@@ -158,7 +169,7 @@ export default {
           if (p?.mode === "turn" || p?.mode === "facil" || p?.mode === "simul") {
             setMode(activeStudio, p.mode); // 버튼 클릭과 동치 — 하이라이트·👑 동기화
           }
-          onHuman(activeStudio, text);
+          onHuman(activeStudio, text, p?.cut === true);
           return { ok: true, sent: text, mode: activeStudio.mode, running: activeStudio.running };
         },
       }),
@@ -371,7 +382,11 @@ export default {
         if (!t) return;
         ta.value = "";
         hideMention();
-        onHuman(st, t);
+        // 진행 중이면 모달 → 취소 시 입력 텍스트를 입력창에 되살림(사용자가 다시 쓸 수 있게).
+        onHuman(st, t, false, () => {
+          ta.value = t;
+          ta.focus();
+        });
       };
 
       // @자동완성 — 커서 앞 '@부분단어'를 잡아 체크된 참가 모델 후보를 팝업. ↑↓ 이동, Enter/Tab/클릭 확정, Esc 닫기.
@@ -451,7 +466,7 @@ export default {
         }
         if (e.key === "Enter" && !e.shiftKey && !(e as any).isComposing) {
           e.preventDefault();
-          doSend();
+          doSend(); // 진행 중이면 onHuman 이 모달, 멈춰 있으면 바로 전송
         }
       });
       setStatus(st, "대기");
@@ -473,6 +488,7 @@ export default {
         b.type = "button";
         b.textContent = label;
         b.dataset.mode = m;
+        b.dataset.node = `mode/${m}`; // contributes.nodes — ui.input.click 로 모드 전환(E2E·AI 제어)
         b.classList.toggle("on", m === st.mode);
         b.addEventListener("click", () => setMode(st, m));
         return b;
@@ -498,6 +514,13 @@ export default {
         if (st.mode === "facil" && entry.checked) {
           const crown = elText("span", "👑", "st-crown" + (entry.id === st.facilitatorId ? " on" : ""));
           crown.title = "진행자로 지정";
+          crown.dataset.node = `crown/${entry.id}`; // contributes.nodes — ui.input.click 로 진행자 지정
+          // click 리스너 — ui.input.click(합성 click) 경로(사람 클릭은 chip pointerup 가 처리, 중복 무해).
+          crown.addEventListener("click", (e) => {
+            e.stopPropagation();
+            st.facilitatorId = entry.id;
+            renderTabs(st, st.tabsEl);
+          });
           chip.append(crown);
         }
         // 상호작용 — element setPointerCapture 가 이 웹뷰에서 불안정해 드래그가 "탭"으로 처리됐다(체크 토글 오작동).
@@ -553,23 +576,42 @@ export default {
       st.status.textContent = t;
     }
 
-    // 사람 발화 — 언제나 최우선. 멈춰 있으면 바로 구동. 진행 중이면 현재 발화(들)를 '지금까지'로 끊고(중단)
-    // 부분응답을 종결 보존한 뒤, 사람 입력을 그 뒤로 세션 주입하고 새 라운드 재구동(취소-제거 아님 — 사람 대화처럼).
-    // 진행 중일 땐 사람 메시지를 여기서 push/render 하지 않는다 — 드라이브가 부분응답 종결 직후 주입(올바른 순서).
-    function onHuman(st: StudioState, text: string) {
+    // 사람 발화 — LLM 이 멈춰 있으면 그냥 전송. 진행 중이면 모달을 띄워 어떻게 보낼지 고른다:
+    //   지금 끊기 = 현재 발화 중단(engine.cancel) → 부분응답 종결 보존 → 그 뒤 세션 주입 → 재구동.
+    //   끝나면 넣기 = 안 끊고 대기 큐("대기 중" 배지) → 현 흐름 자연 종료 후 주입.
+    //   취소 = 전송 안 함(입력 텍스트는 onCancel 로 입력창에 되살림).
+    // 진행 중엔 여기서 conv push/render 안 함 — 드라이브가 종결 직후 주입(올바른 순서: 발화 → 사람).
+    function onHuman(st: StudioState, text: string, forceCut?: boolean, onCancel?: () => void) {
       if (!st.running) {
         st.conv.push({ who: "human", text });
         renderUser(st, text);
         void runLoop(st);
         return;
       }
-      st.pendingHuman.push(text);
-      for (const c of st.actives) engine.cancel(c.connId, c.sessionId); // 진행 중 전부 중단(동시=N)
-      setStatus(st, "참견 — 현재 발화 종결 후 반영");
+      const apply = (kind: "cut" | "wait") => {
+        st.pendingHuman.push(text);
+        if (kind === "cut") {
+          for (const c of st.actives) engine.cancel(c.connId, c.sessionId); // 진행 중 전부 중단(동시=N)
+          setStatus(st, "참견 — 현재 발화 종결 후 반영");
+        } else {
+          renderQueued(st); // 안 끊음 — "대기 중" 배지로 미반영 표시(현 흐름 끝나면 주입)
+          setStatus(st, "대기 중 — 현재 대화가 끝나면 반영");
+        }
+      };
+      if (forceCut) return apply("cut"); // send 명령 cut:true — E2E 결정론
+      // 진행 중 입력 = 모달로 전송 방식 선택(LLM 이 뭔가 하는 중이므로).
+      const who = [...st.actives].map((c) => nameOf(c.agentId)).join(", ") || "대화";
+      showInterjectAlert(st, who, (choice) => {
+        if (choice === "cut") apply("cut");
+        else if (choice === "wait") apply("wait");
+        else onCancel?.(); // 취소 — 입력창에 텍스트 되살림
+      });
     }
 
     // 대기 중 사람 입력을 세션에 주입 — 부분응답 종결 직후 호출(순서: 발화 → 사람). conv push + 렌더.
     function injectPending(st: StudioState) {
+      clearQueued(st); // "대기 중" 배지 제거(이제 실제 발화로 들어감)
+      clearModal(st); // 잔류 모달 제거(안전)
       for (const t of st.pendingHuman) {
         st.conv.push({ who: "human", text: t });
         renderUser(st, t);
@@ -869,6 +911,55 @@ export default {
       row.append(who, bubble(text));
       st.msgs.appendChild(row);
       scroll(st);
+    }
+
+    // 대기(wait) 중 사람 입력 — "대기 중" 배지로 미반영 표시(흐릿한 버블). 주입 시 clearQueued 로 제거.
+    function renderQueued(st: StudioState) {
+      clearQueued(st);
+      const last = st.pendingHuman[st.pendingHuman.length - 1] ?? "";
+      const row = el("div", "st-row user queued");
+      row.dataset.queued = "1";
+      const who = el("div", "st-who");
+      who.append(elText("span", "나", "st-who-name"), elText("span", " · 대기 중", "st-queued-tag"));
+      row.append(who, bubble(last));
+      st.msgs.appendChild(row);
+      scroll(st);
+    }
+    function clearQueued(st: StudioState) {
+      st.msgs.querySelectorAll('.st-row.queued[data-queued="1"]').forEach((n) => n.remove());
+    }
+    // 떠 있는 참견 모달 제거 — 흐름 종료/새 입력 시 잔류 방지(stale 모달이 화면에 남지 않게).
+    function clearModal(st: StudioState) {
+      st.msgs.parentElement?.querySelectorAll(".st-modal").forEach((n) => n.remove());
+    }
+
+    // 참견 레이어 알럿(interjectMode=ask) — 뷰 내부 DOM 모달(window.confirm 금지). 진행 중 발화자 이름 표기,
+    // [지금 끊기]/[끝나면 넣기]/[취소]. choice 콜백으로 결과 전달. 한 번 선택하면 닫힘.
+    function showInterjectAlert(st: StudioState, who: string, cb: (c: "cut" | "wait" | "cancel") => void) {
+      const root = st.msgs.parentElement ?? st.msgs; // .st 컨테이너
+      st.msgs.parentElement?.querySelectorAll(".st-modal").forEach((n) => n.remove()); // 중복 방지
+      const back = el("div", "st-modal");
+      const box = el("div", "st-modal-box");
+      box.append(elText("div", `${who} 말하는 중`, "st-modal-title"));
+      box.append(elText("div", "지금 끼어들까요, 끝나면 넣을까요?", "st-modal-msg"));
+      const btns = el("div", "st-modal-btns");
+      const close = (c: "cut" | "wait" | "cancel") => {
+        back.remove();
+        cb(c);
+      };
+      const mk = (label: string, c: "cut" | "wait" | "cancel", primary?: boolean) => {
+        const b = elText("button", label, "st-modal-btn" + (primary ? " primary" : ""));
+        b.dataset.node = `modal/${c}`; // contributes.nodes — ui.input.click 로 모달 응답(E2E·AI 제어)
+        b.addEventListener("click", () => close(c));
+        return b;
+      };
+      btns.append(mk("지금 끊기", "cut", true), mk("끝나면 넣기", "wait"), mk("취소", "cancel"));
+      box.append(btns);
+      back.append(box);
+      back.addEventListener("click", (e) => {
+        if (e.target === back) close("cancel"); // 배경 클릭 = 취소
+      });
+      root.appendChild(back);
     }
     // 턴 행 — 이름 + 본문(처음엔 "응답 중…" 맥동 인디케이터). toBubble()=빈 버블로 교체(스트리밍),
     // fail(reason)=사유 노출(연결/세션/빈응답 실패를 조용히 숨기지 않음), remove()=행 폐기(참견 재시작).
