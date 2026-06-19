@@ -293,7 +293,13 @@ var CSS = `
 .st-bubble{padding:8px 11px;border-radius:10px;white-space:pre-wrap;word-break:break-word;line-height:1.45}
 .st-row.user .st-bubble{background:#2d6cdf;color:#fff}
 .st-row.assistant .st-bubble{background:rgba(127,127,127,.14)}
-.st-who{font-size:10.5px;color:var(--fg3,#888);padding:0 4px;font-weight:600}
+.st-who{display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-size:10.5px;color:var(--fg3,#888);padding:0 4px}
+.st-who-name{font-weight:600}
+.st-who-time{font-weight:400;opacity:.75;font-variant-numeric:tabular-nums}
+.st-think{cursor:pointer;font-weight:400;font-size:10px;color:var(--fg3,#888);border:1px solid rgba(127,127,127,.3);border-radius:6px;padding:0 5px;user-select:none}
+.st-think:hover{border-color:rgba(127,127,127,.55)}
+.st-think.open{color:var(--fg2,#bbb);background:rgba(127,127,127,.12)}
+.st-think-body{align-self:flex-start;max-width:88%;margin:2px 0 0;font-size:11px;line-height:1.45;color:var(--fg3,#888);background:rgba(127,127,127,.06);border-left:2px solid rgba(127,127,127,.35);border-radius:4px;padding:6px 9px;white-space:pre-wrap;word-break:break-word}
 .st-tool{align-self:flex-start;max-width:88%;border:1px solid rgba(127,127,127,.25);border-radius:8px;padding:6px 9px;font-size:12px;background:rgba(127,127,127,.06)}
 .st-pending{align-self:flex-start;font-size:11px;color:var(--fg3,#888);display:flex;align-items:center;gap:6px}
 .st-dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:st-pulse 1.1s ease-in-out infinite}
@@ -770,6 +776,7 @@ var main_default = {
           const row = renderTurnRow(st, speaker);
           const failTurn = (reason) => {
             row.fail(reason);
+            row.setTime();
             st.conv.push({ who: "system", text: `${nameOf(speaker)} ${reason}` });
           };
           const conn = await ensureConn(st, speaker);
@@ -812,6 +819,8 @@ var main_default = {
           const { work, club } = demux(r.ok ? r.text ?? "" : "");
           if (work) {
             (cur.bubble ?? (cur.bubble = row.toBubble())).textContent = work;
+            row.setTime();
+            if (typeof r.reasoning === "string" && r.reasoning) row.setReasoning(r.reasoning);
           } else {
             failTurn(r.ok ? "\uC751\uB2F5 \uC5C6\uC74C(\uBE48 \uBC1C\uD654)" : `\uD504\uB86C\uD504\uD2B8 \uC2E4\uD328: ${String(r.error ?? "")}`);
           }
@@ -853,14 +862,19 @@ var main_default = {
     }
     function renderUser(st, text) {
       const row = el("div", "st-row user");
-      row.append(elText("div", "\uB098", "st-who"), bubble(text));
+      const who = el("div", "st-who");
+      who.append(elText("span", "\uB098", "st-who-name"), elText("span", ` \xB7 ${hhmmss()}`, "st-who-time"));
+      row.append(who, bubble(text));
       st.msgs.appendChild(row);
       scroll(st);
     }
     function renderTurnRow(st, agentId) {
       const row = el("div", "st-row assistant");
-      const who = elText("div", nameOf(agentId), "st-who");
-      who.style.color = COLOR[agentId] ?? "var(--fg3,#888)";
+      const who = el("div", "st-who");
+      const nameEl = elText("span", nameOf(agentId), "st-who-name");
+      nameEl.style.color = COLOR[agentId] ?? "var(--fg3,#888)";
+      const timeEl = el("span", "st-who-time");
+      who.append(nameEl, timeEl);
       const pending = el("div", "st-pending");
       pending.append(el("span", "st-dot"), document.createTextNode("\uC751\uB2F5 \uC911\u2026"));
       row.append(who, pending);
@@ -884,6 +898,26 @@ var main_default = {
           f.title = reason;
           swap(f);
         },
+        // 발화 시각 — who 라인에 ' · 22:35:01'. 그냥 현재 시각을 찍는다(관찰·디버깅: 언제 발화했는지).
+        setTime() {
+          timeEl.textContent = ` \xB7 ${hhmmss()}`;
+        },
+        // 리소닝/띵킹(agent_thought_chunk) — 💭 배지(클릭하면 펼침). 작업 텍스트와 분리, 기본 접힘.
+        setReasoning(text) {
+          if (!text.trim()) return;
+          const badge = elText("span", "\u{1F4AD} \uC0DD\uAC01", "st-think");
+          badge.title = "\uD074\uB9AD\uD558\uBA74 \uB9AC\uC18C\uB2DD \uD3BC\uCE58\uAE30/\uC811\uAE30";
+          const panel = elText("div", text, "st-think-body");
+          panel.style.display = "none";
+          badge.addEventListener("click", () => {
+            const open = panel.style.display === "none";
+            panel.style.display = open ? "block" : "none";
+            badge.classList.toggle("open", open);
+            if (open) scroll(st);
+          });
+          who.appendChild(badge);
+          row.appendChild(panel);
+        },
         remove() {
           row.remove();
         }
@@ -902,6 +936,11 @@ var main_default = {
       if (cls) e.className = cls;
       e.textContent = text;
       return e;
+    }
+    function hhmmss() {
+      const d = /* @__PURE__ */ new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }
     function bubble(text) {
       const b = el("div", "st-bubble");
