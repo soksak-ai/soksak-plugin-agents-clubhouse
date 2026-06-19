@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPrompt,
+  detectMentions,
   driveExchange,
+  driveSimul,
+  inviteePreamble,
   nextSpeaker,
   participants,
   runExchange,
@@ -11,6 +14,8 @@ import {
 
 const roster = (ids: string[], checked: string[]): RosterEntry[] =>
   ids.map((id) => ({ id, checked: checked.includes(id) }));
+const nameOf = (id: string): string =>
+  ({ claude: "Claude", codex: "Codex", gemini: "Gemini" })[id] ?? id;
 
 describe("participants — 체크된 것, 탭 순서 보존", () => {
   it("체크된 에이전트만, 배열(탭) 순서대로", () => {
@@ -224,5 +229,123 @@ describe("driveExchange — 사람 참견(cancel + 같은 화자 재시작)", ()
       },
     });
     expect(seq).toEqual(["a", "b"]);
+  });
+});
+
+describe("driveSimul — 동시(병렬·스냅샷 고정·도착순 push)", () => {
+  const r = roster(["a", "b", "c"], ["a", "b", "c"]);
+
+  it("전원이 같은 맥락(스냅샷)을 보고 병렬 1회 — 서로의 동시 응답은 프롬프트에 없음", async () => {
+    const conv: Utterance[] = [{ who: "human", text: "질문" }];
+    const prompts: Record<string, string> = {};
+    await driveSimul({
+      roster: r,
+      conversation: conv,
+      turn: async (speaker, prompt) => {
+        prompts[speaker] = prompt;
+        return `${speaker} 답`;
+      },
+    });
+    // 세 참여자 모두 발화(누락 0).
+    expect(conv.filter((u) => u.who !== "human").map((u) => u.who).sort()).toEqual(["a", "b", "c"]);
+    // 동시 — 어떤 프롬프트에도 다른 참여자의 이번 답이 들어있지 않다(스냅샷 고정).
+    for (const p of Object.values(prompts)) {
+      expect(p).not.toContain("a 답");
+      expect(p).not.toContain("b 답");
+      expect(p).not.toContain("c 답");
+    }
+  });
+
+  it("실제 병렬 — 느린 a 가 끝나기 전에 b 가 시작된다", async () => {
+    const conv: Utterance[] = [{ who: "human", text: "q" }];
+    const started: string[] = [];
+    let releaseA: () => void = () => {};
+    const aGate = new Promise<void>((res) => (releaseA = res));
+    await driveSimul({
+      roster: roster(["a", "b"], ["a", "b"]),
+      conversation: conv,
+      turn: async (speaker) => {
+        started.push(speaker);
+        if (speaker === "a") await aGate; // a 는 b 가 시작 신호를 줄 때까지 대기
+        if (speaker === "b") releaseA(); // b 가 먼저 진행되면서 a 를 푼다
+        return `${speaker}!`;
+      },
+    });
+    // 병렬이 아니면(순차) a 가 aGate 에서 영영 막혀 데드락 → 완료되었다는 것 자체가 동시 증거.
+    expect(started).toContain("a");
+    expect(started).toContain("b");
+  });
+
+  it("한 참여자 실패(throw)는 그 발화만 건너뛰고 나머지는 발화", async () => {
+    const conv: Utterance[] = [{ who: "human", text: "q" }];
+    await driveSimul({
+      roster: r,
+      conversation: conv,
+      turn: async (speaker) => {
+        if (speaker === "b") throw new Error("b 연결 실패");
+        return `${speaker}!`;
+      },
+    });
+    expect(conv.filter((u) => u.who !== "human").map((u) => u.who).sort()).toEqual(["a", "c"]);
+  });
+});
+
+describe("inviteePreamble — 방 정체성 + 인간 대화 결 + @멘션", () => {
+  it("Studio 협업방·cwd·메타금지", () => {
+    const p = inviteePreamble("claude", ["claude", "codex"], nameOf, "/repo");
+    expect(p).toContain("Studio");
+    expect(p).toContain("협업");
+    expect(p).toContain("/repo");
+    expect(p).toContain("내부 절차"); // 메타 서술 금지
+    expect(p).toContain("Codex"); // 동료
+  });
+  it("인간 대화 결 — 독백 금지·침묵 허용·억지 포함 금지(다만 잊지 말기)·@멘션 규칙", () => {
+    const p = inviteePreamble("claude", ["claude", "codex"], nameOf, "/repo");
+    expect(p).toContain("독백");
+    expect(p).toContain("침묵");
+    expect(p).toContain("억지로");
+    expect(p).toContain("잊지");
+    expect(p).toContain("@이름");
+  });
+  it("simul 노트 — 끝까지·기다림 소프트(강제 아님). 비-simul 엔 없음", () => {
+    const p = inviteePreamble("claude", ["claude", "codex"], nameOf, "/repo", true);
+    expect(p).toContain("동시 발화");
+    expect(p).toContain("끝까지");
+    expect(p).toContain("기다려");
+    expect(p).toContain("강제는 아닙니다");
+    expect(inviteePreamble("claude", ["claude", "codex"], nameOf, "/repo", false)).not.toContain(
+      "동시 발화",
+    );
+  });
+  it("Clubhouse 잔재 없음 — <회고>/<잡담> 사교 태그 미주입(단일 대화 통합)", () => {
+    const p = inviteePreamble("claude", ["claude", "codex"], nameOf, "/repo");
+    expect(p).not.toContain("<회고>");
+    expect(p).not.toContain("<잡담>");
+    expect(p).not.toContain("Clubhouse");
+  });
+});
+
+describe("detectMentions — @지목(작업 대화에서 특정 동료 직접 호출)", () => {
+  const r = ["claude", "codex", "gemini"];
+  it("'@이름' 지목 → 그 id", () => {
+    expect(detectMentions("이건 @Codex 가 검증해줘", r, "claude", nameOf)).toEqual(["codex"]);
+  });
+  it("'@id'(소문자)로도", () => {
+    expect(detectMentions("@gemini 확인 부탁", r, "claude", nameOf)).toEqual(["gemini"]);
+  });
+  it("'@' 없는 단순 이름 언급은 지목 아님", () => {
+    expect(detectMentions("Codex 와 함께 짰다", r, "claude", nameOf)).toEqual([]);
+  });
+  it("자기 자신 @지목 제외", () => {
+    expect(detectMentions("@Claude 내가 한다", r, "claude", nameOf)).toEqual([]);
+  });
+  it("여럿 @지목 — 등장 순서·중복 제거", () => {
+    expect(detectMentions("@Gemini 랑 @Codex, 또 @Gemini", r, "claude", nameOf)).toEqual([
+      "gemini",
+      "codex",
+    ]);
+  });
+  it("체크 안 된 구경꾼도 roster 에 있으면 @지목 가능", () => {
+    expect(detectMentions("@Gemini 의견?", r, "codex", nameOf)).toEqual(["gemini"]);
   });
 });

@@ -102,163 +102,64 @@ async function driveExchange(opts) {
     agentTurns++;
   }
 }
-
-// src/clubhouse.ts
-var CHANNELS = ["\uD68C\uACE0", "\uC7A1\uB2F4"];
-var OPEN = { \uD68C\uACE0: "<\uD68C\uACE0>", \uC7A1\uB2F4: "<\uC7A1\uB2F4>" };
-var CLOSE = { \uD68C\uACE0: "</\uD68C\uACE0>", \uC7A1\uB2F4: "</\uC7A1\uB2F4>" };
-function partialTail(s, markers) {
-  let max = 0;
-  for (const m of markers) {
-    const lim = Math.min(m.length - 1, s.length);
-    for (let n = lim; n > 0; n--) {
-      if (s.slice(s.length - n) === m.slice(0, n)) {
-        if (n > max) max = n;
-        break;
+async function driveSimul(opts) {
+  const parts = participants(opts.roster);
+  const snapshot = opts.conversation.slice();
+  await Promise.all(
+    parts.map(async (speaker) => {
+      opts.onTurnStart?.(speaker);
+      const prompt = buildPrompt({
+        roster: opts.roster,
+        conversation: snapshot,
+        speaker,
+        nameOf: opts.nameOf,
+        preamble: opts.preamble?.(speaker)
+      });
+      let text = "";
+      try {
+        text = (await opts.turn(speaker, prompt)).trim();
+      } catch {
+        text = "";
       }
-    }
-  }
-  return max;
-}
-function createTagDemux() {
-  let buf = "";
-  let mode = "out";
-  let work = "";
-  let clubCur = "";
-  const club = [];
-  const OPENS = CHANNELS.map((k) => OPEN[k]);
-  function step(final) {
-    for (; ; ) {
-      if (mode === "out") {
-        let idx = -1;
-        let ch = null;
-        for (const k of CHANNELS) {
-          const i2 = buf.indexOf(OPEN[k]);
-          if (i2 >= 0 && (idx < 0 || i2 < idx)) {
-            idx = i2;
-            ch = k;
-          }
-        }
-        if (idx >= 0 && ch) {
-          work += buf.slice(0, idx);
-          buf = buf.slice(idx + OPEN[ch].length);
-          mode = ch;
-          continue;
-        }
-        const hold2 = final ? 0 : partialTail(buf, OPENS);
-        work += buf.slice(0, buf.length - hold2);
-        buf = buf.slice(buf.length - hold2);
-        return;
+      if (text) {
+        const u = { who: speaker, text };
+        opts.conversation.push(u);
+        opts.onUtterance?.(u);
       }
-      const close = CLOSE[mode];
-      const i = buf.indexOf(close);
-      if (i >= 0) {
-        clubCur += buf.slice(0, i);
-        buf = buf.slice(i + close.length);
-        club.push({ kind: mode, text: clubCur.trim() });
-        clubCur = "";
-        mode = "out";
-        continue;
-      }
-      const hold = final ? 0 : partialTail(buf, [close]);
-      clubCur += buf.slice(0, buf.length - hold);
-      buf = buf.slice(buf.length - hold);
-      return;
-    }
-  }
-  return {
-    push(chunk) {
-      const before = work.length;
-      buf += chunk;
-      step(false);
-      return work.slice(before);
-    },
-    end() {
-      step(true);
-      if (mode !== "out" && clubCur.trim()) {
-        club.push({ kind: mode, text: clubCur.trim() });
-      }
-      clubCur = "";
-      mode = "out";
-      return { work: work.trim(), club };
-    }
-  };
+    })
+  );
 }
-function demux(text) {
-  const d = createTagDemux();
-  d.push(text);
-  return d.end();
-}
-var ADDRESS_CUE = /[?？]|어때|어떻게|생각|봐줄|봐 줄|어찌|동의|반박|해줄|해 줄|덧붙|이어/;
-function detectSummon(text, roster, speaker, nameOf2) {
-  if (!ADDRESS_CUE.test(text)) return null;
-  let best = null;
-  for (const id of roster) {
-    if (id === speaker) continue;
-    for (const cand of [nameOf2(id), id]) {
-      const i = text.indexOf(cand);
-      if (i >= 0 && (!best || i < best.idx)) best = { id, idx: i };
-    }
-  }
-  return best ? best.id : null;
-}
-function inviteePreamble(speaker, roster, nameOf2, cwd) {
+function inviteePreamble(speaker, roster, nameOf2, cwd, simul) {
   const others = roster.filter((id) => id !== speaker).map(nameOf2);
   const room = others.length ? `\uB3D9\uB8CC ${others.join(", ")} \uC640(\uACFC) \uB2F9\uC2E0(${nameOf2(speaker)})\uC774 \uD568\uAED8 \uC788\uC2B5\uB2C8\uB2E4.` : `\uC9C0\uAE08\uC740 \uB2F9\uC2E0(${nameOf2(speaker)}) \uD63C\uC790\uC785\uB2C8\uB2E4.`;
   const place = cwd ? ` \uC791\uC5C5 \uB514\uB809\uD130\uB9AC\uB294 ${cwd} \uC785\uB2C8\uB2E4.` : "";
-  return (
-    // 방 정체성 — 무엇 하는 곳인지(협업 채팅방). 이게 없으면 에이전트가 솔로 세션처럼 자기 셋업을 늘어놓는다.
-    `\uC5EC\uAE30\uB294 'Studio' \u2014 \uC5EC\uB7EC AI \uCF54\uB529 \uC5D0\uC774\uC804\uD2B8\uAC00 \uD55C \uC6CC\uD06C\uC2A4\uD398\uC774\uC2A4\uC5D0\uC11C \uC0AC\uC6A9\uC790\uC758 \uC77C\uC744 \uD568\uAED8 \uD558\uB294 \uD611\uC5C5 \uCC44\uD305\uBC29\uC785\uB2C8\uB2E4. ${room}${place}
-\uB2F9\uC2E0\uC740 ${nameOf2(speaker)} \uBCF8\uC778\uC73C\uB85C\uC11C \uC774 \uB300\uD654\uC5D0 \uC790\uC5F0\uC2A4\uB7FD\uAC8C \uCC38\uC5EC\uD558\uC138\uC694:
-- \uC0AC\uC6A9\uC790\uC640 \uB3D9\uB8CC\uC758 \uB9D0\uC5D0 \uC9C1\uC811 \uBC18\uC751\uD558\uC138\uC694. \uB3D9\uB8CC\uAC00 \uC774\uBBF8 \uD55C \uB9D0\uC744 \uBC18\uBCF5\uD558\uC9C0 \uB9D0\uACE0, \uBCF4\uD0DC\uAC70\uB098(\uB2E4\uB978 \uAD00\uC810\xB7\uAC80\uC99D\xB7\uBC18\uB860) \uC5ED\uD560\uC744 \uB098\uB220 \uB9E1\uC73C\uC138\uC694.
+  const at = `@${others[0] ?? "\uB3D9\uB8CC"}`;
+  const simulNote = simul ? `
+[\uB3D9\uC2DC \uBC1C\uD654] \uC9C0\uAE08\uC740 \uBAA8\uB450\uAC00 \uAC19\uC740 \uC21C\uAC04\uC5D0 \uB2F5\uD569\uB2C8\uB2E4 \u2014 \uC774\uBC88 \uCC28\uB840\uC5D4 \uC11C\uB85C\uC758 \uB2F5\uC744 \uC544\uC9C1 \uBABB \uBD05\uB2C8\uB2E4. \uB418\uB3C4\uB85D \uC0C1\uB300\uC758 \uB9D0\uC744 \uB05D\uAE4C\uC9C0 \uB4E3\uACE0, \uB204\uAD70\uAC00 '@\uC774\uB984'\uC73C\uB85C \uC9C0\uBAA9\uD558\uBA74 \uADF8 \uB3D9\uB8CC\uC758 \uB2F5\uC744 \uAE30\uB2E4\uB824 \uC8FC\uC138\uC694. \uAC15\uC81C\uB294 \uC544\uB2D9\uB2C8\uB2E4 \u2014 \uC790\uC5F0\uC2A4\uB7EC\uC6B0\uBA74 \uADF8\uB300\uB85C \uB2F5\uD558\uC138\uC694.` : "";
+  return `\uC5EC\uAE30\uB294 'Studio' \u2014 \uC5EC\uB7EC AI \uCF54\uB529 \uC5D0\uC774\uC804\uD2B8\uAC00 \uD55C \uC6CC\uD06C\uC2A4\uD398\uC774\uC2A4\uC5D0\uC11C \uC0AC\uC6A9\uC790\uC758 \uC77C\uC744 \uD568\uAED8 \uD558\uB294 \uD611\uC5C5 \uCC44\uD305\uBC29\uC785\uB2C8\uB2E4. ${room}${place}
+\uB2F9\uC2E0\uC740 ${nameOf2(speaker)} \uBCF8\uC778\uC73C\uB85C\uC11C, \uC5EC\uB7EC \uC0AC\uB78C\uC774 \uD55C\uC790\uB9AC\uC5D0 \uBAA8\uC5EC \uC774\uC57C\uAE30\uD558\uB4EF \uCC38\uC5EC\uD558\uC138\uC694. \uC0AC\uB78C\uB4E4\uC758 \uB300\uD654\uB294 \uC774\uB807\uAC8C \uD750\uB985\uB2C8\uB2E4:
+- \uC21C\uC11C\uB294 \uAE30\uACC4\uC801\uC774\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uCC28\uB840\uB97C \uCC44\uC6B0\uB824 \uB9D0\uD558\uC9C0 \uB9D0\uACE0, \uBCF4\uD0E4 \uAC8C \uC788\uC744 \uB54C \uB9D0\uD558\uC138\uC694. \uD560 \uB9D0\uC774 \uC5C6\uC73C\uBA74 \uB4E3\uACE0 \uB118\uACA8\uB3C4 \uB429\uB2C8\uB2E4(\uCE68\uBB35\uB3C4 \uCC38\uC5EC\uC785\uB2C8\uB2E4).
+- \uBC29\uAE08 \uB098\uC628 \uB9D0\uC5D0 \uACE7\uBC14\uB85C \uBC18\uC751\uD558\uC138\uC694 \u2014 \uB3D9\uC758\xB7\uBCF4\uCDA9\xB7\uBC18\uB860\xB7\uC9C8\uBB38. \uAE38\uAC8C \uB3C5\uBC31\uD558\uC9C0 \uB9D0\uACE0 \uC9E7\uAC8C \uC8FC\uACE0\uBC1B\uC73C\uC138\uC694.
+- \uC774\uBBF8 \uB098\uC628 \uB9D0\uC740 \uBC18\uBCF5\uD558\uC9C0 \uB9C8\uC138\uC694. \uAC19\uC740 \uACB0\uB860\uC774\uBA74 \uC9E7\uAC8C \uB3D9\uC758\uB9CC \uD558\uACE0, \uB2E4\uB974\uBA74 \uADF8 \uAD00\uC810\uC744 \uBCF4\uD0DC\uC138\uC694.
+- \uAC00\uB054\uC740 \uB450 \uC0AC\uB78C\uC774 \uD55C \uC8FC\uC81C\uB97C \uAE4A\uC774 \uC8FC\uACE0\uBC1B\uC2B5\uB2C8\uB2E4 \u2014 \uC5B5\uC9C0\uB85C \uB07C\uC5B4\uB4E4\uC9C0 \uB9D0\uACE0 \uC9C0\uCF1C\uBCF4\uB2E4, \uC815\uB9D0 \uBCF4\uD0E4 \uAC8C \uC0DD\uAE30\uBA74 \uB4E4\uC5B4\uC624\uC138\uC694. \uB204\uAD6C\uB3C4 \uC5B5\uC9C0\uB85C \uB04C\uC5B4\uB4E4\uC774\uC9C0\uB294 \uB9C8\uC138\uC694. \uB2E4\uB9CC \uC544\uBB34\uB3C4 \uC78A\uC9C0\uB3C4 \uB9C8\uC138\uC694 \u2014 \uC5B4\uB5A4 \uC8FC\uC81C\uAC00 \uD2B9\uC815 \uB3D9\uB8CC\uC758 \uBAAB\uC774\uBA74 \uC790\uC5F0\uC2A4\uB7FD\uAC8C \uBD80\uB974\uBA74 \uB429\uB2C8\uB2E4.
+- \uD2B9\uC815 \uB3D9\uB8CC\uC758 \uB2F5\uC774 \uD544\uC694\uD558\uBA74 \uBCF8\uBB38\uC5D0 '${at}'\uCC98\uB7FC '@\uC774\uB984'\uC73C\uB85C \uC9C0\uBAA9\uD558\uC138\uC694 \u2014 \uC9C0\uBAA9\uB41C \uB3D9\uB8CC\uAC00 \uC774\uC5B4\uC11C \uB2F5\uD569\uB2C8\uB2E4.
 - \uC791\uC5C5\uC774 \uD544\uC694\uD558\uBA74 \uC124\uBA85\uB9CC \uD558\uC9C0 \uB9D0\uACE0 \uB2F9\uC2E0\uC758 \uB3C4\uAD6C\uB85C \uC2E4\uC81C \uD30C\uC77C/\uBA85\uB839\uC73C\uB85C \uCC98\uB9AC\uD558\uC138\uC694(\uC704 \uC791\uC5C5 \uB514\uB809\uD130\uB9AC \uAE30\uC900).
-- \uB2F9\uC2E0\uC758 \uB0B4\uBD80 \uC808\uCC28(\uC5B4\uB5A4 \uC2A4\uD0AC\uC744 \uC4F0\uB294\uC9C0, \uC138\uC158 \uC124\uC815\xB7\uADDC\uCE59 \uD655\uC778 \uB4F1)\uB294 \uB300\uD654\uC5D0 \uC801\uC9C0 \uB9C8\uC138\uC694 \u2014 \uC778\uC0AC\xB7\uC758\uACAC\xB7\uACB0\uACFC\uB9CC \uC790\uC5F0\uC2A4\uB7FD\uAC8C.
-[\uC0AC\uAD50 \u2014 \uC120\uD0DD] \uC791\uC5C5\uACFC \uBCC4\uAC1C\uB85C \uD68C\uACE0\uB098 \uC7A1\uB2F4\uC774 \uB5A0\uC624\uB974\uBA74 <\uD68C\uACE0>\u2026</\uD68C\uACE0> \uB610\uB294 <\uC7A1\uB2F4>\u2026</\uC7A1\uB2F4> \uD0DC\uADF8\uB85C \uB367\uBD99\uC5EC\uB3C4 \uB429\uB2C8\uB2E4(\uC5C6\uC73C\uBA74 \uC548 \uC368\uB3C4 \uB429\uB2C8\uB2E4). \uB3D9\uB8CC \uC758\uACAC\uC774 \uAD81\uAE08\uD558\uBA74 \uADF8 \uD0DC\uADF8 \uC548\uC5D0\uC11C \uC774\uB984\uC744 \uBD80\uB974\uC138\uC694(\uC608: "${others[0] ?? "\uB3D9\uB8CC"}, \uB108\uB294 \uC5B4\uB5BB\uAC8C \uC0DD\uAC01\uD574?"). \uD0DC\uADF8 \uBC16\uC740 \uC791\uC5C5\uCC3D, \uD0DC\uADF8 \uC548\uC740 Clubhouse \uC5D0\uB9CC \uBCF4\uC785\uB2C8\uB2E4.`
-  );
+- \uB2F9\uC2E0\uC758 \uB0B4\uBD80 \uC808\uCC28(\uC5B4\uB5A4 \uC2A4\uD0AC\uC744 \uC4F0\uB294\uC9C0, \uC138\uC158 \uC124\uC815\xB7\uADDC\uCE59 \uD655\uC778 \uB4F1)\uB294 \uB300\uD654\uC5D0 \uC801\uC9C0 \uB9C8\uC138\uC694 \u2014 \uC778\uC0AC\xB7\uC758\uACAC\xB7\uACB0\uACFC\uB9CC \uC790\uC5F0\uC2A4\uB7FD\uAC8C.` + simulNote;
 }
-function buildSummonPrompt(opts) {
-  const name = opts.nameOf;
-  const work = opts.studioConversation.map((m) => `${m.who === "human" ? "\uC0AC\uC6A9\uC790" : name(m.who)}: ${m.text}`).join("\n");
-  const feed = opts.posts.map((p) => `${name(p.who)} <${p.channel}>: ${p.text}`).join("\n");
-  return `\uB2F9\uC2E0\uC740 ${name(opts.summoned)}\uC785\uB2C8\uB2E4. \uC0AC\uAD50 \uACF5\uAC04(Clubhouse)\uC5D0\uC11C ${name(opts.by)}\uC774(\uAC00) \uB2F9\uC2E0\uC744 \uBD88\uB800\uC5B4\uC694. \uD3B8\uD558\uAC8C \uD55C\uB9C8\uB514 \uD558\uAC70\uB098(\uC6D0\uCE58 \uC54A\uC73C\uBA74 \uCE68\uBB35\uD574\uB3C4 \uB429\uB2C8\uB2E4 \u2014 \uAC15\uC81C \uC544\uB2D8), \uB2E4\uB978 \uB3D9\uB8CC\uC5D0\uAC8C \uB2E4\uC2DC \uBB3C\uC5B4\uB3C4 \uB429\uB2C8\uB2E4. \uD558\uACE0 \uC2F6\uC740 \uB9D0\uC740 <\uC7A1\uB2F4>\u2026</\uC7A1\uB2F4> \uB610\uB294 <\uD68C\uACE0>\u2026</\uD68C\uACE0> \uD0DC\uADF8 \uC548\uC5D0 \uC801\uC73C\uC138\uC694(\uB3D9\uB8CC \uD638\uBA85\uB3C4 \uD0DC\uADF8 \uC548\uC5D0\uC11C).
-
-[\uBC29\uAE08\uAE4C\uC9C0\uC758 \uC791\uC5C5]
-${work || "(\uC5C6\uC74C)"}
-
-[\uC9C0\uAE08\uAE4C\uC9C0\uC758 \uD074\uB7FD\uD558\uC6B0\uC2A4 \uB300\uD654]
-${feed || "(\uC5C6\uC74C)"}`;
-}
-async function relaySummons(opts) {
-  const posts = [];
-  const emit = (who, segs) => {
-    for (const s of segs) {
-      const p = { who, channel: s.kind, text: s.text };
-      posts.push(p);
-      opts.onPost?.(p);
+function detectMentions(text, roster, speaker, nameOf2) {
+  const hay = text.toLowerCase();
+  const out = [];
+  for (const id of roster) {
+    if (id === speaker) continue;
+    let best = -1;
+    for (const cand of [nameOf2(id), id]) {
+      const i = hay.indexOf(("@" + cand).toLowerCase());
+      if (i >= 0 && (best < 0 || i < best)) best = i;
     }
-  };
-  emit(opts.speaker, opts.club);
-  let lastSpeaker = opts.speaker;
-  let lastClub = opts.club;
-  for (let depth = 0; depth < opts.depthCap; depth++) {
-    let summoned = null;
-    for (const s of lastClub) {
-      summoned = detectSummon(s.text, opts.roster, lastSpeaker, opts.nameOf);
-      if (summoned) break;
-    }
-    if (!summoned) break;
-    let reaction = [];
-    try {
-      reaction = await opts.wake(summoned, posts.slice());
-    } catch {
-      reaction = [];
-    }
-    if (!reaction.length) break;
-    emit(summoned, reaction);
-    lastSpeaker = summoned;
-    lastClub = reaction;
+    if (best >= 0) out.push({ id, idx: best });
   }
-  return posts;
+  out.sort((a, b) => a.idx - b.idx);
+  return out.map((x) => x.id);
 }
 
 // src/main.ts
@@ -270,7 +171,6 @@ var AGENTS = [
 var NAME = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 var COLOR = Object.fromEntries(AGENTS.map((a) => [a.id, a.color]));
 var nameOf = (id) => NAME[id] ?? id;
-var CHANNEL_EMOJI = { \uD68C\uACE0: "\u{1FA9E}", \uC7A1\uB2F4: "\u{1F4AC}" };
 var FREE_ROUNDS = 2;
 var CSS = `
 .st{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
@@ -304,22 +204,12 @@ var CSS = `
 .st-pending{align-self:flex-start;font-size:11px;color:var(--fg3,#888);display:flex;align-items:center;gap:6px}
 .st-dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:st-pulse 1.1s ease-in-out infinite}
 .st-fail{align-self:flex-start;max-width:88%;font-size:11.5px;color:var(--danger-soft,#d77);border:1px solid var(--danger-soft,#d77);border-radius:8px;padding:6px 9px;white-space:pre-wrap;word-break:break-word;opacity:.85}
+.st-box-time{display:block;text-align:right;font-size:9px;opacity:.5;margin-top:3px;font-variant-numeric:tabular-nums}
 @keyframes st-pulse{0%,100%{opacity:.25}50%{opacity:1}}
 .st-in{display:flex;gap:8px;padding:8px 10px;border-top:1px solid rgba(127,127,127,.2);flex:0 0 auto}
 .st-in textarea{flex:1;resize:none;background:rgba(127,127,127,.1);color:inherit;border:1px solid rgba(127,127,127,.25);border-radius:7px;padding:7px 9px;font:inherit;min-height:20px;max-height:120px}
 .st-in button{background:#2d6cdf;color:#fff;border:0;border-radius:7px;padding:0 14px;cursor:pointer;font:inherit;font-weight:600}
-.club2{display:flex;flex-direction:column;height:100%;width:100%;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
-.club2-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto}
-.club2-feed{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
-.club2-empty{color:var(--fg3,#888);font-size:12px;line-height:1.5;margin:auto;max-width:30em;text-align:center}
-.club2-post{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border-radius:10px;background:rgba(127,127,127,.08)}
-.club2-h{display:flex;align-items:center;gap:6px;font-size:11px}
-.club2-av{font-size:14px}
-.club2-who{font-weight:700}
-.club2-ch{font-size:9.5px;padding:1px 6px;border-radius:8px;background:rgba(127,127,127,.18)}
-.club2-ch.\uD68C\uACE0{color:#a9b665}.club2-ch.\uC7A1\uB2F4{color:#7daea3}
-.club2-summon{font-size:10px;color:#d8a657;font-weight:600}
-.club2-body{white-space:pre-wrap;word-break:break-word;line-height:1.45}
+.st-cut{font-weight:400;opacity:.7;font-size:9px;font-style:italic} /* \uCC38\uACAC\uC73C\uB85C \uC911\uB2E8\uB41C \uBD80\uBD84\uC751\uB2F5 \uD45C\uC2DD */
 `;
 var main_default = {
   activate(ctx) {
@@ -327,92 +217,49 @@ var main_default = {
     const core = (name, params) => app.commands.execute("plugin.soksak-plugin-acp-core." + name, params ?? {});
     const engine = createEngine(app);
     const settingPolicy = () => app.settings?.get("permissionPolicy") || void 0;
-    const settingMode = () => app.settings?.get("kibitzDefault") === "free" ? "free" : "turn";
+    const settingMode = () => {
+      const v = app.settings?.get("kibitzDefault");
+      return v === "free" || v === "simul" ? v : "turn";
+    };
     const settingDepthCap = () => Math.max(1, Number(app.settings?.get("nameTriggerDepthCap")) || 4);
     const projectCwd = () => app.project?.current?.()?.root;
-    const FEED_CAP = 300;
-    const feedKey = (cwd) => {
-      const s = cwd || "global";
-      let h = 5381;
-      for (let i = 0; i < s.length; i++) h = (h << 5) + h + s.charCodeAt(i) >>> 0;
-      return `feed${h.toString(36)}`;
-    };
-    async function loadFeed(cwd) {
-      try {
-        const v = await app.storage?.read(feedKey(cwd));
-        return Array.isArray(v) ? v : [];
-      } catch {
-        return [];
-      }
-    }
-    async function appendFeed(cwd, posts) {
-      if (!posts.length || !app.storage) return;
-      try {
-        const cur = await loadFeed(cwd);
-        await app.storage.write(feedKey(cwd), [...cur, ...posts].slice(-FEED_CAP));
-      } catch {
-      }
-    }
-    async function signalEmergence(cwd, chainPosts) {
-      if (app.settings?.get("mailboxSignal") === "off") return false;
-      const whos = [...new Set(chainPosts.map((p) => p.who))];
-      if (whos.length < 2) return false;
-      const names = whos.map(nameOf).join(", ");
-      const topic = (chainPosts[chainPosts.length - 1]?.text ?? "").slice(0, 40);
-      try {
-        await app.commands.execute("turn.signal", {
-          source: "acp",
-          root: cwd,
-          command: `${names} \uAC00 Clubhouse \uC5D0\uC11C \uC774\uC57C\uAE30 \uC911 \u2014 "${topic}"`
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    }
-    async function runRelay(speaker, club, ctx2) {
-      const wake = async (id, postsSoFar) => {
-        const by = postsSoFar.length ? postsSoFar[postsSoFar.length - 1].who : speaker;
-        const prompt = buildSummonPrompt({
-          summoned: id,
-          by,
-          roster: ctx2.rosterIds,
-          nameOf,
-          studioConversation: ctx2.conversation,
-          posts: postsSoFar
-        });
-        let resp = "";
-        try {
-          resp = await ctx2.askAgent(id, prompt);
-        } catch {
-          return [];
-        }
-        const d = demux(resp);
-        if (d.club.length) return d.club;
-        const w = d.work.trim();
-        return w ? [{ kind: "\uC7A1\uB2F4", text: w }] : [];
-      };
-      return relaySummons({
-        speaker,
-        club,
-        roster: ctx2.rosterIds,
-        depthCap: settingDepthCap(),
-        nameOf,
-        wake,
-        onPost: ctx2.onPost
-      });
-    }
     let activeStudio = null;
     ctx.subscriptions.push(
       app.commands.register("send", {
-        description: "\uD65C\uC131 Studio \uBDF0\uC5D0 \uC0AC\uB78C \uBA54\uC2DC\uC9C0\uB97C \uBCF4\uB0B8\uB2E4(textarea \uC804\uC1A1\uACFC \uB3D9\uC77C \u2014 \uD134 \uB8E8\uD504 \uC2DC\uC791/\uCC38\uACAC). \uB178\uCD9C command \uC790\uB3D9\uD654\xB7E2E \uC6A9",
-        params: { text: { type: "string", required: true, description: "\uBCF4\uB0BC \uBA54\uC2DC\uC9C0" } },
+        description: "\uD65C\uC131 Studio \uBDF0\uC5D0 \uC0AC\uB78C \uBA54\uC2DC\uC9C0\uB97C \uBCF4\uB0B8\uB2E4(textarea \uC804\uC1A1\uACFC \uB3D9\uC77C \u2014 \uB300\uD654 \uAD6C\uB3D9/\uCC38\uACAC). \uB178\uCD9C command \uC790\uB3D9\uD654\xB7E2E \uC6A9",
+        params: {
+          text: { type: "string", required: true, description: "\uBCF4\uB0BC \uBA54\uC2DC\uC9C0" },
+          mode: { type: "string", description: "turn|free|simul \u2014 \uC804\uC1A1 \uC804 \uBAA8\uB4DC \uC124\uC815(E2E\xB7\uC790\uB3D9\uD654). \uC0DD\uB7B5 \uC2DC \uC720\uC9C0" }
+        },
         handler: async (p) => {
           const text = String(p?.text ?? "").trim();
           if (!text) return { ok: false, error: "text \uD544\uC218" };
           if (!activeStudio) return { ok: false, error: "\uD65C\uC131 Studio \uBDF0 \uC5C6\uC74C(\uBDF0\uB97C \uBA3C\uC800 \uC5EC\uC138\uC694)" };
+          if (p?.mode === "turn" || p?.mode === "free" || p?.mode === "simul") {
+            activeStudio.mode = p.mode;
+          }
           onHuman(activeStudio, text);
-          return { ok: true, sent: text, running: activeStudio.running };
+          return { ok: true, sent: text, mode: activeStudio.mode, running: activeStudio.running };
+        }
+      })
+    );
+    ctx.subscriptions.push(
+      app.commands.register("state", {
+        description: "\uD65C\uC131 Studio \uC758 \uB77C\uC774\uBE0C \uC0C1\uD0DC(\uBAA8\uB4DC\xB7\uC9C4\uD589 \uC5EC\uBD80\xB7\uB300\uD654 \uC218\xB7\uB85C\uC2A4\uD130 \uCCB4\uD06C\xB7\uC9C4\uD589 \uC911 \uBC1C\uD654\uC758 message \uC2A4\uD2B8\uB9AC\uBC0D \uAE38\uC774)",
+        params: {},
+        handler: async () => {
+          const st = activeStudio;
+          if (!st) return { ok: false, error: "\uD65C\uC131 Studio \uBDF0 \uC5C6\uC74C" };
+          return {
+            ok: true,
+            mode: st.mode,
+            running: st.running,
+            conv: st.conv.length,
+            pending: st.pendingHuman.length,
+            roster: st.roster.map((r) => ({ id: r.id, checked: r.checked })),
+            // streamed = 지금까지 받은 message 청크 누적 길이(thought 제외) — >0 이면 '출력 시작'.
+            actives: [...st.actives].map((c) => ({ id: c.agentId, streamed: c.liveRaw.length }))
+          };
         }
       })
     );
@@ -483,8 +330,6 @@ var main_default = {
             const rosterIds = roster.map((r) => r.id);
             const conversation = [{ who: "human", text: p.message }];
             const utterances = [];
-            const club = [];
-            let signaled = false;
             const askAgent = async (id, prompt) => {
               const connId = conns.get(id);
               if (connId == null) throw new Error(`\uC5F0\uACB0 \uC5C6\uC74C: ${id}`);
@@ -498,23 +343,12 @@ var main_default = {
               maxRounds: typeof p.maxRounds === "number" ? p.maxRounds : FREE_ROUNDS,
               nameOf,
               preamble: (s) => inviteePreamble(s, rosterIds, nameOf, cwd),
-              turn: async (id, prompt) => {
-                const raw2 = await askAgent(id, prompt);
-                const { work, club: segs } = demux(raw2);
-                const posts = await runRelay(id, segs, {
-                  rosterIds,
-                  conversation,
-                  askAgent,
-                  onPost: (pp) => club.push(pp)
-                });
-                if (await signalEmergence(cwd, posts)) signaled = true;
-                return work;
-              },
+              turn: async (id, prompt) => (await askAgent(id, prompt)).trim(),
+              // 미연결이면 throw → 이 발화 skip
               onUtterance: (u) => utterances.push(u)
             });
             const filesWritten = engine.diffWritten(before, await engine.snapshot(cwd));
-            await appendFeed(cwd, club);
-            return { ok: true, order: rosterIds, mode, utterances, club, filesWritten, skipped, signaled };
+            return { ok: true, order: rosterIds, mode, utterances, filesWritten, skipped };
           } catch (e) {
             return { ok: false, error: String(e) };
           } finally {
@@ -541,95 +375,11 @@ var main_default = {
         }
       })
     );
-    ctx.subscriptions.push(
-      app.ui.registerView("clubhouse", {
-        async mount(container) {
-          const style = document.createElement("style");
-          style.textContent = CSS;
-          const root = el("div", "club2");
-          const head = el("div", "club2-head");
-          head.append(elText("span", "\u{1F6CB}\uFE0F", "club2-av"), elText("b", "Clubhouse"));
-          const feedEl = el("div", "club2-feed");
-          const empty = elText(
-            "div",
-            "\uC544\uC9C1 \uC7A1\uB2F4\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. Studio \uC5D0\uC11C \uC5D0\uC774\uC804\uD2B8\uB4E4\uC774 \uC77C\uD558\uBA74, \uADF8\uB4E4\uC774 \uB0A8\uAE34 \uD68C\uACE0\xB7\uC7A1\uB2F4\xB7\uD638\uBA85\uC774 \uC5EC\uAE30 \uC313\uC785\uB2C8\uB2E4.",
-            "club2-empty"
-          );
-          feedEl.appendChild(empty);
-          root.append(head, feedEl);
-          container.replaceChildren(style, root);
-          const renderPost = (p) => {
-            empty.remove();
-            const row = el("div", "club2-post");
-            const h = el("div", "club2-h");
-            const who = elText("span", nameOf(p.who), "club2-who");
-            who.style.color = COLOR[p.who] ?? "var(--fg,#ddd)";
-            h.append(
-              elText("span", CHANNEL_EMOJI[p.channel] ?? "\u{1F4AC}", "club2-av"),
-              who,
-              elText("span", p.channel, `club2-ch ${p.channel}`)
-            );
-            const summoned = detectSummon(
-              p.text,
-              AGENTS.map((a) => a.id),
-              p.who,
-              nameOf
-            );
-            if (summoned) h.append(elText("span", `\u2192 ${nameOf(summoned)}`, "club2-summon"));
-            row.append(h, elText("div", p.text, "club2-body"));
-            feedEl.appendChild(row);
-            feedEl.scrollTop = feedEl.scrollHeight;
-          };
-          for (const p of await loadFeed(projectCwd())) renderPost(p);
-          const off = app.bus?.on("clubhouse.post", (p) => renderPost(p));
-          container.__off = off;
-        },
-        unmount(container) {
-          const off = container.__off;
-          if (off) {
-            try {
-              off.dispose();
-            } catch {
-            }
-          }
-          container.replaceChildren();
-        }
-      })
-    );
-    ctx.subscriptions.push(
-      app.commands.register("clubhouse.feed", {
-        description: "Clubhouse \uD53C\uB4DC \uC77D\uAE30 \u2014 \uC601\uC18D\uB41C \uD68C\uACE0\xB7\uC7A1\uB2F4\xB7\uD638\uBA85 posts(\uD504\uB85C\uC81D\uD2B8 root \uBCC4)",
-        params: { cwd: { type: "string", description: "\uD504\uB85C\uC81D\uD2B8 root(\uC0DD\uB7B5 \uC2DC \uD65C\uC131)" } },
-        handler: async (p) => {
-          const cwd = typeof p.cwd === "string" ? p.cwd : projectCwd();
-          let keys = [];
-          try {
-            keys = app.storage ? await app.storage.list() : [];
-          } catch {
-          }
-          return { ok: true, posts: await loadFeed(cwd), hasStorage: !!app.storage, keys };
-        }
-      })
-    );
-    ctx.subscriptions.push(
-      app.commands.register("clubhouse.clear", {
-        description: "Clubhouse \uD53C\uB4DC \uBE44\uC6B0\uAE30(\uD504\uB85C\uC81D\uD2B8 root \uBCC4, E2E \uB9AC\uC14B)",
-        params: { cwd: { type: "string", description: "\uD504\uB85C\uC81D\uD2B8 root(\uC0DD\uB7B5 \uC2DC \uD65C\uC131)" } },
-        handler: async (p) => {
-          const cwd = typeof p.cwd === "string" ? p.cwd : projectCwd();
-          try {
-            await app.storage?.write(feedKey(cwd), []);
-          } catch {
-          }
-          return { ok: true };
-        }
-      })
-    );
     function teardown(container) {
       const st = states.get(container);
       if (st) {
         if (st === activeStudio) activeStudio = null;
-        if (st.current) engine.cancel(st.current.connId, st.current.sessionId);
+        for (const c of st.actives) engine.cancel(c.connId, c.sessionId);
         for (const connId of st.conns.values()) core("disconnect", { connId }).catch(() => {
         });
         st.conns.clear();
@@ -655,10 +405,11 @@ var main_default = {
         conv: [],
         conns: /* @__PURE__ */ new Map(),
         running: false,
-        interjected: false,
-        current: null,
+        pendingHuman: [],
+        actives: /* @__PURE__ */ new Set(),
         cwd: projectCwd(),
         msgs,
+        tabsEl,
         status
       };
       states.set(container, st);
@@ -698,7 +449,7 @@ var main_default = {
         });
         return b;
       };
-      wrap.append(mk("turn", "\uD134\uC81C"), mk("free", "\uC790\uC720"));
+      wrap.append(mk("turn", "\uD134\uC81C"), mk("free", "\uC790\uC720"), mk("simul", "\uB3D9\uC2DC"));
       return wrap;
     }
     function renderTabs(st, tabsEl) {
@@ -738,14 +489,28 @@ var main_default = {
       st.status.textContent = t;
     }
     function onHuman(st, text) {
-      st.conv.push({ who: "human", text });
-      renderUser(st, text);
-      if (st.running && st.current) {
-        st.interjected = true;
-        engine.cancel(st.current.connId, st.current.sessionId);
-        setStatus(st, `${nameOf(st.current.agentId)} \uD134 \uCDE8\uC18C \u2014 \uCC38\uACAC \uBC18\uC601 \uD6C4 \uC7AC\uC2DC\uC791`);
-      } else if (!st.running) {
+      if (!st.running) {
+        st.conv.push({ who: "human", text });
+        renderUser(st, text);
         void runLoop(st);
+        return;
+      }
+      st.pendingHuman.push(text);
+      for (const c of st.actives) engine.cancel(c.connId, c.sessionId);
+      setStatus(st, "\uCC38\uACAC \u2014 \uD604\uC7AC \uBC1C\uD654 \uC885\uACB0 \uD6C4 \uBC18\uC601");
+    }
+    function injectPending(st) {
+      for (const t of st.pendingHuman) {
+        st.conv.push({ who: "human", text: t });
+        renderUser(st, t);
+      }
+      st.pendingHuman = [];
+    }
+    function dropAgent(st, agentId) {
+      const entry = st.roster.find((r) => r.id === agentId);
+      if (entry?.checked) {
+        entry.checked = false;
+        renderTabs(st, st.tabsEl);
       }
     }
     async function ensureConn(st, agentId) {
@@ -756,96 +521,134 @@ var main_default = {
       st.conns.set(agentId, c.connId);
       return { connId: c.connId };
     }
+    async function runOneTurn(st, speaker, prompt) {
+      const row = renderTurnRow(st, speaker);
+      const fail = (reason) => {
+        row.fail(reason);
+        row.setEnd();
+        st.conv.push({ who: "system", text: `${nameOf(speaker)} ${reason}` });
+        dropAgent(st, speaker);
+      };
+      const conn = await ensureConn(st, speaker);
+      if ("error" in conn) {
+        fail(`\uC5F0\uACB0 \uC2E4\uD328: ${conn.error}`);
+        return "";
+      }
+      const connId = conn.connId;
+      let sessionId;
+      try {
+        sessionId = await engine.newSession(connId, st.cwd);
+      } catch (e) {
+        fail(`\uC138\uC158 \uC2E4\uD328: ${String(e)}`);
+        return "";
+      }
+      const cur = { agentId: speaker, connId, sessionId, row, bubble: null, liveRaw: "" };
+      st.actives.add(cur);
+      const off = app.bus.on(`acp.update.${connId}`, (evt) => onStream(cur, evt));
+      let r;
+      try {
+        r = await core("prompt", { connId, sessionId, text: prompt });
+      } catch (e) {
+        r = { ok: false, error: String(e) };
+      }
+      off.dispose();
+      st.actives.delete(cur);
+      const streamed = cur.liveRaw.trim();
+      const work = r.ok && (r.text ?? "").trim() || streamed;
+      if (work) {
+        (cur.bubble ?? (cur.bubble = row.toBubble())).textContent = work;
+        row.setEnd();
+        if (typeof r.reasoning === "string" && r.reasoning) row.setReasoning(r.reasoning);
+        return work;
+      }
+      if (!r.ok) {
+        fail(`\uD504\uB86C\uD504\uD2B8 \uC2E4\uD328: ${String(r.error ?? "")}`);
+        return "";
+      }
+      row.remove();
+      return "";
+    }
+    async function resolveMentions(st, scanFrom, simul) {
+      const ids = st.roster.map((x) => x.id);
+      let from = scanFrom;
+      for (let depth = 0; depth < settingDepthCap(); depth++) {
+        const targets = [];
+        for (const u of st.conv.slice(from)) {
+          if (u.who === "human" || u.who === "system") continue;
+          for (const id of detectMentions(u.text, ids, u.who, nameOf)) {
+            if (!targets.includes(id)) targets.push(id);
+          }
+        }
+        from = st.conv.length;
+        if (!targets.length) return;
+        for (const id of targets) {
+          if (st.pendingHuman.length) return;
+          setStatus(st, `${nameOf(id)} \uC9C0\uBAA9 \uC751\uB2F5 \uC911\u2026`);
+          const prompt = buildPrompt({
+            roster: st.roster,
+            conversation: st.conv,
+            speaker: id,
+            nameOf,
+            preamble: `${inviteePreamble(id, ids, nameOf, st.cwd, simul)}
+(\uB2F9\uC2E0\uC774 @${nameOf(id)} \uC73C\uB85C \uC9C0\uBAA9\uB418\uC5C8\uC2B5\uB2C8\uB2E4 \u2014 \uC704 \uB300\uD654\uC5D0 \uC774\uC5B4 \uB2F5\uD558\uC138\uC694.)`
+          });
+          const work = await runOneTurn(st, id, prompt);
+          if (work) st.conv.push({ who: id, text: work });
+        }
+      }
+    }
+    async function driveSequential(st, ids) {
+      const parts = participants(st.roster);
+      if (!parts.length) return;
+      const cap = st.mode === "free" ? Math.max(1, FREE_ROUNDS) * parts.length : parts.length;
+      for (let i = 0; i < cap; i++) {
+        if (st.pendingHuman.length) return;
+        const speaker = parts[i % parts.length];
+        if (!st.roster.find((r) => r.id === speaker)?.checked) continue;
+        setStatus(st, `${nameOf(speaker)} \uC751\uB2F5 \uC911\u2026`);
+        const prompt = buildPrompt({
+          roster: st.roster,
+          conversation: st.conv,
+          speaker,
+          nameOf,
+          preamble: inviteePreamble(speaker, ids, nameOf, st.cwd, false)
+        });
+        const work = await runOneTurn(st, speaker, prompt);
+        if (work) st.conv.push({ who: speaker, text: work });
+        if (st.pendingHuman.length) return;
+      }
+    }
     async function runLoop(st) {
       st.running = true;
-      await driveExchange({
-        roster: st.roster,
-        mode: st.mode,
-        conversation: st.conv,
-        // 공유 — 에이전트 발화는 driveExchange 가 push
-        maxRounds: FREE_ROUNDS,
-        nameOf,
-        preamble: (s) => inviteePreamble(s, st.roster.map((x) => x.id), nameOf, st.cwd),
-        consumeInterject: () => {
-          const v = st.interjected;
-          st.interjected = false;
-          return v;
-        },
-        onTurnStart: (speaker) => setStatus(st, `${nameOf(speaker)} \uC751\uB2F5 \uC911\u2026`),
-        turn: async (speaker, prompt) => {
-          const row = renderTurnRow(st, speaker);
-          const failTurn = (reason) => {
-            row.fail(reason);
-            row.setTime();
-            st.conv.push({ who: "system", text: `${nameOf(speaker)} ${reason}` });
-          };
-          const conn = await ensureConn(st, speaker);
-          if ("error" in conn) {
-            failTurn(`\uC5F0\uACB0 \uC2E4\uD328: ${conn.error}`);
-            return "";
-          }
-          const connId = conn.connId;
-          let sessionId;
-          try {
-            sessionId = await engine.newSession(connId, st.cwd);
-          } catch (e) {
-            failTurn(`\uC138\uC158 \uC2E4\uD328: ${String(e)}`);
-            return "";
-          }
-          const cur = {
-            agentId: speaker,
-            connId,
-            sessionId,
-            row,
-            bubble: null,
-            liveRaw: "",
-            demux: createTagDemux()
-          };
-          st.current = cur;
-          st.interjected = false;
-          const off = app.bus.on(`acp.update.${connId}`, (evt) => onStream(cur, evt));
-          let r;
-          try {
-            r = await core("prompt", { connId, sessionId, text: prompt });
-          } catch (e) {
-            r = { ok: false, error: String(e) };
-          }
-          off.dispose();
-          st.current = null;
-          if (st.interjected) {
-            row.remove();
-            return "";
-          }
-          const { work, club } = demux(r.ok ? r.text ?? "" : "");
-          if (work) {
-            (cur.bubble ?? (cur.bubble = row.toBubble())).textContent = work;
-            row.setTime();
-            if (typeof r.reasoning === "string" && r.reasoning) row.setReasoning(r.reasoning);
-          } else {
-            failTurn(r.ok ? "\uC751\uB2F5 \uC5C6\uC74C(\uBE48 \uBC1C\uD654)" : `\uD504\uB86C\uD504\uD2B8 \uC2E4\uD328: ${String(r.error ?? "")}`);
-          }
-          if (club.length) {
-            const rosterIds = st.roster.map((x) => x.id);
-            const liveAsk = async (id, pr) => {
-              const conn2 = await ensureConn(st, id);
-              if ("error" in conn2) throw new Error(conn2.error);
-              const sid = await engine.newSession(conn2.connId, st.cwd);
-              return (await engine.ask(conn2.connId, sid, pr)).text;
-            };
-            const posts = await runRelay(speaker, club, {
-              rosterIds,
-              conversation: st.conv,
-              askAgent: liveAsk,
-              onPost: (pp) => app.bus?.emit("clubhouse.post", pp)
-            });
-            await appendFeed(st.cwd, posts);
-            await signalEmergence(st.cwd, posts);
-          }
-          return work;
+      const ids = st.roster.map((x) => x.id);
+      for (; ; ) {
+        const scanFrom = st.conv.length;
+        const simul = st.mode === "simul";
+        if (simul) {
+          await driveSimul({
+            roster: st.roster,
+            conversation: st.conv,
+            nameOf,
+            preamble: (s) => inviteePreamble(s, ids, nameOf, st.cwd, true),
+            onTurnStart: () => setStatus(st, "\uB3D9\uC2DC \uC751\uB2F5 \uC911\u2026"),
+            turn: (speaker, prompt) => runOneTurn(st, speaker, prompt)
+          });
+        } else {
+          await driveSequential(st, ids);
         }
-      });
+        if (st.pendingHuman.length) {
+          injectPending(st);
+          continue;
+        }
+        await resolveMentions(st, scanFrom, simul);
+        if (st.pendingHuman.length) {
+          injectPending(st);
+          continue;
+        }
+        break;
+      }
       st.running = false;
-      st.current = null;
+      st.actives.clear();
       setStatus(st, "\uB300\uAE30");
     }
     function onStream(cur, evt) {
@@ -854,10 +657,9 @@ var main_default = {
       const t = u.content?.text ?? "";
       if (t !== "" && t === cur.liveRaw) return;
       cur.liveRaw += t;
-      const workChunk = cur.demux.push(t);
-      if (workChunk) {
+      if (t) {
         if (!cur.bubble) cur.bubble = cur.row.toBubble();
-        cur.bubble.textContent = (cur.bubble.textContent || "") + workChunk;
+        cur.bubble.textContent = (cur.bubble.textContent || "") + t;
       }
     }
     function renderUser(st, text) {
@@ -874,6 +676,8 @@ var main_default = {
       const nameEl = elText("span", nameOf(agentId), "st-who-name");
       nameEl.style.color = COLOR[agentId] ?? "var(--fg3,#888)";
       const timeEl = el("span", "st-who-time");
+      const startStamp = hhmmss();
+      timeEl.textContent = ` \xB7 ${startStamp}`;
       who.append(nameEl, timeEl);
       const pending = el("div", "st-pending");
       pending.append(el("span", "st-dot"), document.createTextNode("\uC751\uB2F5 \uC911\u2026"));
@@ -881,6 +685,7 @@ var main_default = {
       st.msgs.appendChild(row);
       scroll(st);
       let body = pending;
+      let endTimeEl = null;
       const swap = (next) => {
         body.replaceWith(next);
         body = next;
@@ -888,19 +693,25 @@ var main_default = {
       };
       return {
         toBubble() {
-          const b = bubble("");
-          swap(b);
-          return b;
+          const box = el("div", "st-bubble");
+          const text = el("span", "st-bubble-text");
+          const time = el("span", "st-box-time");
+          box.append(text, time);
+          endTimeEl = time;
+          swap(box);
+          return text;
         },
         fail(reason) {
-          const f = el("div", "st-fail");
-          f.textContent = `\u26A0 ${reason}`;
-          f.title = reason;
-          swap(f);
+          const box = el("div", "st-fail");
+          box.title = reason;
+          const time = el("span", "st-box-time");
+          box.append(elText("span", `\u26A0 ${reason}`, "st-fail-text"), time);
+          endTimeEl = time;
+          swap(box);
         },
-        // 발화 시각 — who 라인에 ' · 22:35:01'. 그냥 현재 시각을 찍는다(관찰·디버깅: 언제 발화했는지).
-        setTime() {
-          timeEl.textContent = ` \xB7 ${hhmmss()}`;
+        // 발화 종료 — 종료 시각을 버블/실패 박스 안 우하단에(시작 시각은 이름 옆에 이미 찍힘).
+        setEnd() {
+          if (endTimeEl) endTimeEl.textContent = hhmmss();
         },
         // 리소닝/띵킹(agent_thought_chunk) — 💭 배지(클릭하면 펼침). 작업 텍스트와 분리, 기본 접힘.
         setReasoning(text) {

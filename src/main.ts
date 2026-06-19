@@ -1,30 +1,26 @@
-// soksak-plugin-acp-studio — 여러 AI 코딩 에이전트를 한 워크스페이스에서 협업.
+// soksak-plugin-acp-studio — 여러 AI 코딩 에이전트를 한 워크스페이스에서 하나의 대화로 협업.
 //
-// 두 뷰: Studio(작업 — 체크박스 로스터·탭 순서 턴제/자유 대화·실파일) + Clubhouse(사교 — 에이전트가 자율로
-// 남기는 회고·잡담, P3). acp-core(라이브러리) 의존: 연결/세션/프롬프트는 engine 이 코어 커맨드로 호출,
-// session/update 는 app.bus(`acp.update.<connId>`) 라이브 구독. 락인 0 — ACP 표준만.
+// 한 뷰: Studio(체크박스 로스터·탭 순서 턴제/자유/동시 대화·실파일). 사교(회고·잡담)는 별도 채널이 아니라
+//   대화 자체에 자연스럽게 녹는다(페르소나가 유도) — 동료 직접 호출은 본문 '@이름' 한 채널로 단일화.
+// acp-core(라이브러리) 의존: 연결/세션/프롬프트는 engine 이 코어 커맨드로 호출, session/update 는
+//   app.bus(`acp.update.<connId>`) 라이브 구독. 락인 0 — ACP 표준만.
 //
-// [P2] 탭(드래그 정렬·체크박스)=참여 로스터, 탭 순서=턴 순서. 참견 모드 토글(turn 턴제 / free 자유).
-//   사람 참견 = 언제나 최우선(진행 턴 cancel → 입력 주입 → 재시작, canonical). 역할 고정 X — 자기 턴에 실작업.
-//   순수 로직(participants/nextSpeaker/buildPrompt/runExchange)은 conversation.ts(단위검증). 호명·demux 는 P3.
+// 탭(드래그 정렬·체크박스)=참여 로스터, 탭 순서=턴 순서. 모드: turn(각 1회)/free(라운드 반복)/simul(전원 병렬).
+//   사람 참견 = 언제나 최우선(진행 턴 중단 → 부분응답 종결 보존 → 입력 주입 → 재구동). 자기 턴에 실작업.
+//   순수 로직(participants/nextSpeaker/buildPrompt/inviteePreamble/detectMentions/drive*)은 conversation.ts(단위검증).
 
 import { createEngine } from "./engine";
 import {
+  buildPrompt,
+  detectMentions,
   driveExchange,
+  driveSimul,
+  inviteePreamble,
+  participants,
   type KibitzMode,
   type RosterEntry,
   type Utterance,
 } from "./conversation";
-import {
-  buildSummonPrompt,
-  createTagDemux,
-  demux,
-  detectSummon,
-  inviteePreamble,
-  relaySummons,
-  type ClubPost,
-  type ClubSegment,
-} from "./clubhouse";
 
 const AGENTS: { id: string; label: string; color: string }[] = [
   { id: "claude", label: "Claude", color: "#d97757" },
@@ -34,7 +30,6 @@ const AGENTS: { id: string; label: string; color: string }[] = [
 const NAME: Record<string, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 const COLOR: Record<string, string> = Object.fromEntries(AGENTS.map((a) => [a.id, a.color]));
 const nameOf = (id: string): string => NAME[id] ?? id;
-const CHANNEL_EMOJI: Record<string, string> = { 회고: "🪞", 잡담: "💬" };
 const FREE_ROUNDS = 2; // free(자유) 모드 라운드 안전판(폭주 방지) — P5 설정화.
 
 const CSS = `
@@ -69,28 +64,18 @@ const CSS = `
 .st-pending{align-self:flex-start;font-size:11px;color:var(--fg3,#888);display:flex;align-items:center;gap:6px}
 .st-dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:st-pulse 1.1s ease-in-out infinite}
 .st-fail{align-self:flex-start;max-width:88%;font-size:11.5px;color:var(--danger-soft,#d77);border:1px solid var(--danger-soft,#d77);border-radius:8px;padding:6px 9px;white-space:pre-wrap;word-break:break-word;opacity:.85}
+.st-box-time{display:block;text-align:right;font-size:9px;opacity:.5;margin-top:3px;font-variant-numeric:tabular-nums}
 @keyframes st-pulse{0%,100%{opacity:.25}50%{opacity:1}}
 .st-in{display:flex;gap:8px;padding:8px 10px;border-top:1px solid rgba(127,127,127,.2);flex:0 0 auto}
 .st-in textarea{flex:1;resize:none;background:rgba(127,127,127,.1);color:inherit;border:1px solid rgba(127,127,127,.25);border-radius:7px;padding:7px 9px;font:inherit;min-height:20px;max-height:120px}
 .st-in button{background:#2d6cdf;color:#fff;border:0;border-radius:7px;padding:0 14px;cursor:pointer;font:inherit;font-weight:600}
-.club2{display:flex;flex-direction:column;height:100%;width:100%;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
-.club2-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto}
-.club2-feed{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
-.club2-empty{color:var(--fg3,#888);font-size:12px;line-height:1.5;margin:auto;max-width:30em;text-align:center}
-.club2-post{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border-radius:10px;background:rgba(127,127,127,.08)}
-.club2-h{display:flex;align-items:center;gap:6px;font-size:11px}
-.club2-av{font-size:14px}
-.club2-who{font-weight:700}
-.club2-ch{font-size:9.5px;padding:1px 6px;border-radius:8px;background:rgba(127,127,127,.18)}
-.club2-ch.회고{color:#a9b665}.club2-ch.잡담{color:#7daea3}
-.club2-summon{font-size:10px;color:#d8a657;font-weight:600}
-.club2-body{white-space:pre-wrap;word-break:break-word;line-height:1.45}
+.st-cut{font-weight:400;opacity:.7;font-size:9px;font-style:italic} /* 참견으로 중단된 부분응답 표식 */
 `;
 
 interface TurnRow {
   toBubble(): HTMLElement;
   fail(reason: string): void;
-  setTime(): void;
+  setEnd(): void;
   setReasoning(text: string): void;
   remove(): void;
 }
@@ -101,8 +86,7 @@ interface Current {
   row: TurnRow;
   // 버블은 lazy — 첫 스트리밍 청크(또는 최종 텍스트)에 생성. 그 전엔 row 의 "응답 중…" 인디케이터 유지.
   bubble: HTMLElement | null;
-  liveRaw: string;
-  demux: ReturnType<typeof createTagDemux>;
+  liveRaw: string; // 스트리밍 raw 누적 — dedup + 참견 중단 시 '말해진 부분' 보존(종결처리)
 }
 
 interface StudioState {
@@ -111,10 +95,11 @@ interface StudioState {
   conv: Utterance[];
   conns: Map<string, number>; // agentId → connId(영속 프로세스, 재사용)
   running: boolean;
-  interjected: boolean;
-  current: Current | null;
+  pendingHuman: string[]; // 진행 중 들어온 사람 참견 — 현재 턴 종결 후 세션 주입(취소-제거 아님)
+  actives: Set<Current>; // 진행 중인 발화들(순차=최대 1, 동시=최대 N) — 중단·정리 대상
   cwd: string | undefined;
   msgs: HTMLElement;
+  tabsEl: HTMLElement; // 로스터 탭 컨테이너 — 세션 오류 시 자동 체크 해제 후 재렌더
   status: HTMLElement;
 }
 
@@ -127,103 +112,13 @@ export default {
 
     const settingPolicy = (): string | undefined =>
       (app.settings?.get("permissionPolicy") as string) || undefined;
-    const settingMode = (): KibitzMode =>
-      ((app.settings?.get("kibitzDefault") as string) === "free" ? "free" : "turn");
+    const settingMode = (): KibitzMode => {
+      const v = app.settings?.get("kibitzDefault") as string;
+      return v === "free" || v === "simul" ? v : "turn";
+    };
     const settingDepthCap = (): number =>
       Math.max(1, Number(app.settings?.get("nameTriggerDepthCap")) || 4);
     const projectCwd = (): string | undefined => app.project?.current?.()?.root;
-
-    // ── Clubhouse 피드 영속(app.storage, 프로젝트 root 별) + 라이브 버스(clubhouse.post) ──
-    // 저장소 key 는 파일명이 된다(코어 sanitize_key 가 /·: 거부) → cwd 를 djb2 해시 슬러그(영숫자)로.
-    const FEED_CAP = 300;
-    const feedKey = (cwd?: string): string => {
-      const s = cwd || "global";
-      let h = 5381;
-      for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-      return `feed${h.toString(36)}`;
-    };
-    async function loadFeed(cwd?: string): Promise<ClubPost[]> {
-      try {
-        const v = await app.storage?.read(feedKey(cwd));
-        return Array.isArray(v) ? (v as ClubPost[]) : [];
-      } catch {
-        return [];
-      }
-    }
-    async function appendFeed(cwd: string | undefined, posts: ClubPost[]) {
-      if (!posts.length || !app.storage) return;
-      try {
-        const cur = await loadFeed(cwd);
-        await app.storage.write(feedKey(cwd), [...cur, ...posts].slice(-FEED_CAP));
-      } catch {
-        /* noop */
-      }
-    }
-
-    // emergent 스레드(한 호명이 응답됨 = 이 relay 체인에 서로 다른 참여자 ≥2)면 열린 `turn.signal` 발행 →
-    // 메시지함(turn.ended 구독, root 스코프)이 메시지화·푸시·딥링크. 코어/메시지함과 결합 0(토픽 계약만, 락인 0).
-    // chainPosts = 한 턴의 relay 체인 결과(누적 피드 아님 — 독립 발화 2개를 emergence 로 오인하지 않게). 반환=발행 여부.
-    async function signalEmergence(cwd: string | undefined, chainPosts: ClubPost[]): Promise<boolean> {
-      if ((app.settings?.get("mailboxSignal") as string) === "off") return false; // 사용자가 끔
-      const whos = [...new Set(chainPosts.map((p) => p.who))];
-      if (whos.length < 2) return false; // 호명 미응답(단발) — 신호 안 함
-      const names = whos.map(nameOf).join(", ");
-      const topic = (chainPosts[chainPosts.length - 1]?.text ?? "").slice(0, 40);
-      try {
-        await app.commands.execute("turn.signal", {
-          source: "acp",
-          root: cwd,
-          command: `${names} 가 Clubhouse 에서 이야기 중 — "${topic}"`,
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    // 호명 연쇄 실행 — wake(소환된 에이전트 1회 ask + demux) 를 askAgent 로 조립해 relaySummons 에 주입.
-    // 소환 에이전트가 태그를 안 쓰면 전체를 잡담으로(소환됐으니 사교). 반환 = 스레드 전체 posts(시작 발화 포함).
-    async function runRelay(
-      speaker: string,
-      club: ClubSegment[],
-      ctx: {
-        rosterIds: string[];
-        conversation: Utterance[];
-        askAgent: (id: string, prompt: string) => Promise<string>;
-        onPost?: (p: ClubPost) => void;
-      },
-    ): Promise<ClubPost[]> {
-      const wake = async (id: string, postsSoFar: ClubPost[]): Promise<ClubSegment[]> => {
-        const by = postsSoFar.length ? postsSoFar[postsSoFar.length - 1].who : speaker;
-        const prompt = buildSummonPrompt({
-          summoned: id,
-          by,
-          roster: ctx.rosterIds,
-          nameOf,
-          studioConversation: ctx.conversation,
-          posts: postsSoFar,
-        });
-        let resp = "";
-        try {
-          resp = await ctx.askAgent(id, prompt);
-        } catch {
-          return [];
-        }
-        const d = demux(resp);
-        if (d.club.length) return d.club;
-        const w = d.work.trim();
-        return w ? [{ kind: "잡담", text: w }] : [];
-      };
-      return relaySummons({
-        speaker,
-        club,
-        roster: ctx.rosterIds,
-        depthCap: settingDepthCap(),
-        nameOf,
-        wake,
-        onPost: ctx.onPost,
-      });
-    }
 
     // 활성(마지막 마운트) Studio 뷰 — send 명령이 라이브 대화를 프로그램적으로 구동(노출 command E2E).
     let activeStudio: StudioState | null = null;
@@ -232,14 +127,43 @@ export default {
     ctx.subscriptions.push(
       app.commands.register("send", {
         description:
-          "활성 Studio 뷰에 사람 메시지를 보낸다(textarea 전송과 동일 — 턴 루프 시작/참견). 노출 command 자동화·E2E 용",
-        params: { text: { type: "string", required: true, description: "보낼 메시지" } },
+          "활성 Studio 뷰에 사람 메시지를 보낸다(textarea 전송과 동일 — 대화 구동/참견). 노출 command 자동화·E2E 용",
+        params: {
+          text: { type: "string", required: true, description: "보낼 메시지" },
+          mode: { type: "string", description: "turn|free|simul — 전송 전 모드 설정(E2E·자동화). 생략 시 유지" },
+        },
         handler: async (p: any) => {
           const text = String(p?.text ?? "").trim();
           if (!text) return { ok: false, error: "text 필수" };
           if (!activeStudio) return { ok: false, error: "활성 Studio 뷰 없음(뷰를 먼저 여세요)" };
+          if (p?.mode === "turn" || p?.mode === "free" || p?.mode === "simul") {
+            activeStudio.mode = p.mode; // 버튼 클릭과 동치(헤드리스 모드 전환)
+          }
           onHuman(activeStudio, text);
-          return { ok: true, sent: text, running: activeStudio.running };
+          return { ok: true, sent: text, mode: activeStudio.mode, running: activeStudio.running };
+        },
+      }),
+    );
+
+    // ── state(활성 Studio 라이브 상태 — E2E·자동화 관찰: 스트리밍 시작 시점 폴링 등) ──
+    ctx.subscriptions.push(
+      app.commands.register("state", {
+        description:
+          "활성 Studio 의 라이브 상태(모드·진행 여부·대화 수·로스터 체크·진행 중 발화의 message 스트리밍 길이)",
+        params: {},
+        handler: async () => {
+          const st = activeStudio;
+          if (!st) return { ok: false, error: "활성 Studio 뷰 없음" };
+          return {
+            ok: true,
+            mode: st.mode,
+            running: st.running,
+            conv: st.conv.length,
+            pending: st.pendingHuman.length,
+            roster: st.roster.map((r) => ({ id: r.id, checked: r.checked })),
+            // streamed = 지금까지 받은 message 청크 누적 길이(thought 제외) — >0 이면 '출력 시작'.
+            actives: [...st.actives].map((c) => ({ id: c.agentId, streamed: c.liveRaw.length })),
+          };
         },
       }),
     );
@@ -325,8 +249,6 @@ export default {
             const rosterIds = roster.map((r) => r.id);
             const conversation: Utterance[] = [{ who: "human", text: p.message }];
             const utterances: Utterance[] = [];
-            const club: ClubPost[] = [];
-            let signaled = false;
             const askAgent = async (id: string, prompt: string): Promise<string> => {
               const connId = conns.get(id);
               if (connId == null) throw new Error(`연결 없음: ${id}`);
@@ -340,23 +262,11 @@ export default {
               maxRounds: typeof p.maxRounds === "number" ? p.maxRounds : FREE_ROUNDS,
               nameOf,
               preamble: (s) => inviteePreamble(s, rosterIds, nameOf, cwd),
-              turn: async (id, prompt) => {
-                const raw = await askAgent(id, prompt); // 미연결이면 throw → driveExchange 가 이 발화 skip
-                const { work, club: segs } = demux(raw); // 태그 밖=작업(Studio), 안=사교(Clubhouse)
-                const posts = await runRelay(id, segs, {
-                  rosterIds,
-                  conversation,
-                  askAgent,
-                  onPost: (pp) => club.push(pp),
-                });
-                if (await signalEmergence(cwd, posts)) signaled = true; // emergent → 메시지함 신호
-                return work;
-              },
+              turn: async (id, prompt) => (await askAgent(id, prompt)).trim(), // 미연결이면 throw → 이 발화 skip
               onUtterance: (u) => utterances.push(u),
             });
             const filesWritten = engine.diffWritten(before, await engine.snapshot(cwd));
-            await appendFeed(cwd, club); // 피드 영속(clubhouse.feed 로 교차검증)
-            return { ok: true, order: rosterIds, mode, utterances, club, filesWritten, skipped, signaled };
+            return { ok: true, order: rosterIds, mode, utterances, filesWritten, skipped };
           } catch (e) {
             return { ok: false, error: String(e) };
           } finally {
@@ -388,105 +298,11 @@ export default {
       }),
     );
 
-    // ── Clubhouse 뷰 — 회고·잡담·호명 피드(영속 로드 + 라이브 버스 구독) ──
-    ctx.subscriptions.push(
-      app.ui.registerView("clubhouse", {
-        async mount(container: HTMLElement) {
-          const style = document.createElement("style");
-          style.textContent = CSS;
-          const root = el("div", "club2");
-          const head = el("div", "club2-head");
-          head.append(elText("span", "🛋️", "club2-av"), elText("b", "Clubhouse"));
-          const feedEl = el("div", "club2-feed");
-          const empty = elText(
-            "div",
-            "아직 잡담이 없습니다. Studio 에서 에이전트들이 일하면, 그들이 남긴 회고·잡담·호명이 여기 쌓입니다.",
-            "club2-empty",
-          );
-          feedEl.appendChild(empty);
-          root.append(head, feedEl);
-          container.replaceChildren(style, root);
-
-          const renderPost = (p: ClubPost) => {
-            empty.remove();
-            const row = el("div", "club2-post");
-            const h = el("div", "club2-h");
-            const who = elText("span", nameOf(p.who), "club2-who");
-            who.style.color = COLOR[p.who] ?? "var(--fg,#ddd)";
-            h.append(
-              elText("span", CHANNEL_EMOJI[p.channel] ?? "💬", "club2-av"),
-              who,
-              elText("span", p.channel, `club2-ch ${p.channel}`),
-            );
-            // 호명 화살표 — 이 발화가 동료를 부르면 "→ 이름"(물고 물리는 연쇄 시각화).
-            const summoned = detectSummon(
-              p.text,
-              AGENTS.map((a) => a.id),
-              p.who,
-              nameOf,
-            );
-            if (summoned) h.append(elText("span", `→ ${nameOf(summoned)}`, "club2-summon"));
-            row.append(h, elText("div", p.text, "club2-body"));
-            feedEl.appendChild(row);
-            feedEl.scrollTop = feedEl.scrollHeight;
-          };
-
-          for (const p of await loadFeed(projectCwd())) renderPost(p);
-          const off = app.bus?.on("clubhouse.post", (p: ClubPost) => renderPost(p));
-          (container as unknown as { __off?: { dispose(): void } }).__off = off;
-        },
-        unmount(container: HTMLElement) {
-          const off = (container as unknown as { __off?: { dispose(): void } }).__off;
-          if (off) {
-            try {
-              off.dispose(); // Disposable{dispose} — 함수 호출이 아니라 dispose() (clubhouse.post 구독 해제)
-            } catch {
-              /* noop */
-            }
-          }
-          container.replaceChildren();
-        },
-      }),
-    );
-
-    // ── Clubhouse 피드 커맨드(읽기·비우기 — E2E·확인) ──
-    ctx.subscriptions.push(
-      app.commands.register("clubhouse.feed", {
-        description: "Clubhouse 피드 읽기 — 영속된 회고·잡담·호명 posts(프로젝트 root 별)",
-        params: { cwd: { type: "string", description: "프로젝트 root(생략 시 활성)" } },
-        handler: async (p: any) => {
-          const cwd = typeof p.cwd === "string" ? p.cwd : projectCwd();
-          let keys: string[] = [];
-          try {
-            keys = app.storage ? await app.storage.list() : [];
-          } catch {
-            /* noop */
-          }
-          return { ok: true, posts: await loadFeed(cwd), hasStorage: !!app.storage, keys };
-        },
-      }),
-    );
-    ctx.subscriptions.push(
-      app.commands.register("clubhouse.clear", {
-        description: "Clubhouse 피드 비우기(프로젝트 root 별, E2E 리셋)",
-        params: { cwd: { type: "string", description: "프로젝트 root(생략 시 활성)" } },
-        handler: async (p: any) => {
-          const cwd = typeof p.cwd === "string" ? p.cwd : projectCwd();
-          try {
-            await app.storage?.write(feedKey(cwd), []);
-          } catch {
-            /* noop */
-          }
-          return { ok: true };
-        },
-      }),
-    );
-
     function teardown(container: HTMLElement) {
       const st = states.get(container);
       if (st) {
         if (st === activeStudio) activeStudio = null; // send 명령 dangling 참조 방지
-        if (st.current) engine.cancel(st.current.connId, st.current.sessionId);
+        for (const c of st.actives) engine.cancel(c.connId, c.sessionId); // 진행 중 전부 취소(동시=N)
         for (const connId of st.conns.values()) core("disconnect", { connId }).catch(() => {});
         st.conns.clear();
       }
@@ -513,10 +329,11 @@ export default {
         conv: [],
         conns: new Map(),
         running: false,
-        interjected: false,
-        current: null,
+        pendingHuman: [],
+        actives: new Set(),
         cwd: projectCwd(),
         msgs,
+        tabsEl,
         status,
       };
       states.set(container, st);
@@ -560,7 +377,7 @@ export default {
         });
         return b;
       };
-      wrap.append(mk("turn", "턴제"), mk("free", "자유"));
+      wrap.append(mk("turn", "턴제"), mk("free", "자유"), mk("simul", "동시"));
       return wrap;
     }
 
@@ -604,16 +421,37 @@ export default {
       st.status.textContent = t;
     }
 
-    // 사람 발화 — 언제나 최우선. 진행 중이면 현재 턴 cancel(참견 → 재시작), 멈춰 있으면 새 교환 시작.
+    // 사람 발화 — 언제나 최우선. 멈춰 있으면 바로 구동. 진행 중이면 현재 발화(들)를 '지금까지'로 끊고(중단)
+    // 부분응답을 종결 보존한 뒤, 사람 입력을 그 뒤로 세션 주입하고 새 라운드 재구동(취소-제거 아님 — 사람 대화처럼).
+    // 진행 중일 땐 사람 메시지를 여기서 push/render 하지 않는다 — 드라이브가 부분응답 종결 직후 주입(올바른 순서).
     function onHuman(st: StudioState, text: string) {
-      st.conv.push({ who: "human", text });
-      renderUser(st, text);
-      if (st.running && st.current) {
-        st.interjected = true;
-        engine.cancel(st.current.connId, st.current.sessionId);
-        setStatus(st, `${nameOf(st.current.agentId)} 턴 취소 — 참견 반영 후 재시작`);
-      } else if (!st.running) {
+      if (!st.running) {
+        st.conv.push({ who: "human", text });
+        renderUser(st, text);
         void runLoop(st);
+        return;
+      }
+      st.pendingHuman.push(text);
+      for (const c of st.actives) engine.cancel(c.connId, c.sessionId); // 진행 중 전부 중단(동시=N)
+      setStatus(st, "참견 — 현재 발화 종결 후 반영");
+    }
+
+    // 대기 중 사람 입력을 세션에 주입 — 부분응답 종결 직후 호출(순서: 발화 → 사람). conv push + 렌더.
+    function injectPending(st: StudioState) {
+      for (const t of st.pendingHuman) {
+        st.conv.push({ who: "human", text: t });
+        renderUser(st, t);
+      }
+      st.pendingHuman = [];
+    }
+
+    // 세션 오류(순단 포함) → 해당 에이전트 자동 체크 해제(roster 드롭). 다음 라운드 참여에서 빠지고, 사람이
+    // 탭을 다시 켜서 재소환한다(이상하면 사람이 판단). 이미 꺼져 있으면 no-op.
+    function dropAgent(st: StudioState, agentId: string) {
+      const entry = st.roster.find((r) => r.id === agentId);
+      if (entry?.checked) {
+        entry.checked = false;
+        renderTabs(st, st.tabsEl);
       }
     }
 
@@ -630,118 +468,162 @@ export default {
       return { connId: c.connId };
     }
 
-    // 라이브 교환 루프 — 시퀀싱(턴 순서·참견 재시작)은 검증된 driveExchange. 여기 turn() 은 연결·세션·스트리밍·버블만.
+    // 한 발화 — 연결·세션·라이브 스트리밍·버블 확정. 순차/동시 공용. 성공/부분=work 반환(호출자가 conv 에 push).
+    // 참견 중단 시 코어가 최종 텍스트를 못 줘도 스트리밍된 부분(liveRaw)을 '말해진 것'으로 종결 보존(취소-제거 아님).
+    // 연결/세션/프롬프트 오류(순단 포함)=사유 행 + system 메시지 + 해당 에이전트 자동 체크 해제. 침묵(빈 ok)=흔적 없이.
+    async function runOneTurn(st: StudioState, speaker: string, prompt: string): Promise<string> {
+      const row = renderTurnRow(st, speaker);
+      const fail = (reason: string) => {
+        row.fail(reason);
+        row.setEnd();
+        st.conv.push({ who: "system", text: `${nameOf(speaker)} ${reason}` });
+        dropAgent(st, speaker); // 세션 오류 → 자동 체크 해제(사람이 재체크로 재소환)
+      };
+      const conn = await ensureConn(st, speaker);
+      if ("error" in conn) {
+        fail(`연결 실패: ${conn.error}`); // codex ENOENT 등 사유를 그대로 노출
+        return "";
+      }
+      const connId = conn.connId;
+      let sessionId: string;
+      try {
+        sessionId = await engine.newSession(connId, st.cwd);
+      } catch (e) {
+        fail(`세션 실패: ${String(e)}`);
+        return "";
+      }
+      // 버블은 아직 안 만든다 — "응답 중…" 인디케이터를 첫 스트리밍 청크(또는 최종 텍스트)까지 유지.
+      const cur: Current = { agentId: speaker, connId, sessionId, row, bubble: null, liveRaw: "" };
+      st.actives.add(cur); // 동시=N개 병렬 등록(각자 connId 로 독립 스트리밍)
+      const off = app.bus.on(`acp.update.${connId}`, (evt: any) => onStream(cur, evt));
+      let r: any;
+      try {
+        r = await core("prompt", { connId, sessionId, text: prompt });
+      } catch (e) {
+        r = { ok: false, error: String(e) };
+      }
+      off.dispose(); // app.bus.on 은 Disposable{dispose} 반환 — 함수 호출(off()) 은 throw → 구독 누수·누적
+      st.actives.delete(cur);
+      // work = 코어 dedup 최종 r.text 우선, 없으면 스트리밍된 부분(liveRaw — 참견 중단 시 '지금까지' 보존).
+      const streamed = cur.liveRaw.trim();
+      const work = (r.ok && (r.text ?? "").trim()) || streamed;
+      if (work) {
+        (cur.bubble ?? (cur.bubble = row.toBubble())).textContent = work; // 인디케이터→버블(없었으면 생성)
+        row.setEnd();
+        if (typeof r.reasoning === "string" && r.reasoning) row.setReasoning(r.reasoning); // 💭 배지
+        return work;
+      }
+      if (!r.ok) {
+        fail(`프롬프트 실패: ${String(r.error ?? "")}`); // 오류 → 노출 + 자동 드롭
+        return "";
+      }
+      row.remove(); // 빈 ok = 의도된 침묵(또는 참견 직격, 한 글자도 안 나옴) — 흔적 없이(침묵도 참여)
+      return "";
+    }
+
+    // @멘션 해소 — 주 구동 뒤, 새 발화에서 '@이름' 지목을 수집해 그 동료를 발화시킨다(체크 안 된 구경꾼도 깨움).
+    // 지목된 발화가 또 누굴 부르면 연쇄. depthCap(설정 nameTriggerDepthCap) 안전판. 참견 들어오면 즉시 양보.
+    async function resolveMentions(st: StudioState, scanFrom: number, simul: boolean) {
+      const ids = st.roster.map((x) => x.id);
+      let from = scanFrom;
+      for (let depth = 0; depth < settingDepthCap(); depth++) {
+        const targets: string[] = [];
+        for (const u of st.conv.slice(from)) {
+          if (u.who === "human" || u.who === "system") continue;
+          for (const id of detectMentions(u.text, ids, u.who, nameOf)) {
+            if (!targets.includes(id)) targets.push(id);
+          }
+        }
+        from = st.conv.length; // 다음 스캔은 새 발화만(무한 재호명 방지)
+        if (!targets.length) return;
+        for (const id of targets) {
+          if (st.pendingHuman.length) return; // 참견 — 상위 루프가 주입·재구동
+          setStatus(st, `${nameOf(id)} 지목 응답 중…`);
+          const prompt = buildPrompt({
+            roster: st.roster,
+            conversation: st.conv,
+            speaker: id,
+            nameOf,
+            preamble: `${inviteePreamble(id, ids, nameOf, st.cwd, simul)}\n(당신이 @${nameOf(id)} 으로 지목되었습니다 — 위 대화에 이어 답하세요.)`,
+          });
+          const work = await runOneTurn(st, id, prompt);
+          if (work) st.conv.push({ who: id, text: work });
+        }
+      }
+    }
+
+    // 순차 구동(턴/자유) — 탭 순서대로(turn=각 1회, free=라운드 반복). 매 발화 전후 참견(pendingHuman) 체크 시
+    // 라운드 중단(상위가 사람 입력 주입·재구동). 라운드 중 체크 해제된 에이전트(오류 자동 드롭·수동)는 건너뜀.
+    async function driveSequential(st: StudioState, ids: string[]) {
+      const parts = participants(st.roster);
+      if (!parts.length) return;
+      const cap = st.mode === "free" ? Math.max(1, FREE_ROUNDS) * parts.length : parts.length;
+      for (let i = 0; i < cap; i++) {
+        if (st.pendingHuman.length) return; // 참견 — 라운드 중단
+        const speaker = parts[i % parts.length];
+        if (!st.roster.find((r) => r.id === speaker)?.checked) continue; // 중도 드롭 — 건너뜀
+        setStatus(st, `${nameOf(speaker)} 응답 중…`);
+        const prompt = buildPrompt({
+          roster: st.roster,
+          conversation: st.conv,
+          speaker,
+          nameOf,
+          preamble: inviteePreamble(speaker, ids, nameOf, st.cwd, false),
+        });
+        const work = await runOneTurn(st, speaker, prompt);
+        if (work) st.conv.push({ who: speaker, text: work });
+        if (st.pendingHuman.length) return; // 발화 직후 참견 — 중단
+      }
+    }
+
+    // 라이브 구동 — 한 라운드(turn/free=순차, simul=병렬) → @멘션 해소. 참견(pendingHuman)이 들어오면 부분응답
+    // 종결 직후 사람 입력을 주입하고 새 라운드 재구동. 참견 없으면 1라운드로 종료(사람 입력 대기).
     async function runLoop(st: StudioState) {
       st.running = true;
-      await driveExchange({
-        roster: st.roster,
-        mode: st.mode,
-        conversation: st.conv, // 공유 — 에이전트 발화는 driveExchange 가 push
-        maxRounds: FREE_ROUNDS,
-        nameOf,
-        preamble: (s) => inviteePreamble(s, st.roster.map((x) => x.id), nameOf, st.cwd),
-        consumeInterject: () => {
-          const v = st.interjected;
-          st.interjected = false;
-          return v;
-        },
-        onTurnStart: (speaker) => setStatus(st, `${nameOf(speaker)} 응답 중…`),
-        turn: async (speaker, prompt) => {
-          // 턴 행 — 시작 즉시 "응답 중…" 맥동 인디케이터(B3-c2). 성공=버블, 실패=사유 표시(B2: 조용한 skip 금지).
-          const row = renderTurnRow(st, speaker);
-          // 실패 = 화면(row.fail) + 세션 보존(st.conv). 에러도 대화에 킵 → 다른 에이전트가 맥락으로 알고
-          // 기록에 남는다(예: Codex 연결 실패를 Claude 가 보고 "다들 대기 중"이라 오인하지 않게).
-          const failTurn = (reason: string) => {
-            row.fail(reason);
-            row.setTime();
-            st.conv.push({ who: "system", text: `${nameOf(speaker)} ${reason}` });
-          };
-          const conn = await ensureConn(st, speaker);
-          if ("error" in conn) {
-            failTurn(`연결 실패: ${conn.error}`); // codex ENOENT 등 사유를 그대로 노출
-            return "";
-          }
-          const connId = conn.connId;
-          let sessionId: string;
-          try {
-            sessionId = await engine.newSession(connId, st.cwd);
-          } catch (e) {
-            failTurn(`세션 실패: ${String(e)}`);
-            return "";
-          }
-          // 버블은 아직 안 만든다 — "응답 중…" 인디케이터를 첫 스트리밍 청크(또는 최종 텍스트)까지 유지.
-          const cur: Current = {
-            agentId: speaker,
-            connId,
-            sessionId,
-            row,
-            bubble: null,
-            liveRaw: "",
-            demux: createTagDemux(),
-          };
-          st.current = cur;
-          st.interjected = false;
-          const off = app.bus.on(`acp.update.${connId}`, (evt: any) => onStream(cur, evt));
-          let r: any;
-          try {
-            r = await core("prompt", { connId, sessionId, text: prompt });
-          } catch (e) {
-            r = { ok: false, error: String(e) };
-          }
-          off.dispose(); // app.bus.on 은 Disposable{dispose} 반환 — 함수 호출(off()) 은 throw → 구독 누수·누적
-          st.current = null;
-          if (st.interjected) {
-            row.remove(); // 참견 — 행 폐기(driveExchange 가 같은 화자 재시작)
-            return "";
-          }
-          // 권위본 — 코어 dedup r.text 를 demux(태그 밖=작업, 안=사교). 버블은 작업 텍스트로 확정(태그 0).
-          const { work, club } = demux(r.ok ? (r.text ?? "") : "");
-          if (work) {
-            (cur.bubble ?? (cur.bubble = row.toBubble())).textContent = work; // 인디케이터→버블(없었으면 생성)
-            row.setTime();
-            if (typeof r.reasoning === "string" && r.reasoning) row.setReasoning(r.reasoning); // 💭 배지
-          } else {
-            failTurn(r.ok ? "응답 없음(빈 발화)" : `프롬프트 실패: ${String(r.error ?? "")}`);
-          }
-          // 사교 — 호명 연쇄(소환된 동료는 ensureConn 으로 깨움) + 피드 버스 emit + 영속.
-          if (club.length) {
-            const rosterIds = st.roster.map((x) => x.id);
-            const liveAsk = async (id: string, pr: string): Promise<string> => {
-              const conn = await ensureConn(st, id);
-              if ("error" in conn) throw new Error(conn.error);
-              const sid = await engine.newSession(conn.connId, st.cwd);
-              return (await engine.ask(conn.connId, sid, pr)).text;
-            };
-            const posts = await runRelay(speaker, club, {
-              rosterIds,
-              conversation: st.conv,
-              askAgent: liveAsk,
-              onPost: (pp) => app.bus?.emit("clubhouse.post", pp),
-            });
-            await appendFeed(st.cwd, posts);
-            await signalEmergence(st.cwd, posts); // emergent → 메시지함 신호(푸시·딥링크)
-          }
-          return work;
-        },
-      });
+      const ids = st.roster.map((x) => x.id);
+      for (;;) {
+        const scanFrom = st.conv.length;
+        const simul = st.mode === "simul";
+        if (simul) {
+          await driveSimul({
+            roster: st.roster,
+            conversation: st.conv,
+            nameOf,
+            preamble: (s) => inviteePreamble(s, ids, nameOf, st.cwd, true),
+            onTurnStart: () => setStatus(st, "동시 응답 중…"),
+            turn: (speaker, prompt) => runOneTurn(st, speaker, prompt),
+          });
+        } else {
+          await driveSequential(st, ids);
+        }
+        if (st.pendingHuman.length) {
+          injectPending(st); // 참견 — 부분응답 종결 뒤 사람 입력 주입(순서: 발화 → 사람)
+          continue; // 새 라운드 재구동
+        }
+        await resolveMentions(st, scanFrom, simul); // @지목 연쇄
+        if (st.pendingHuman.length) {
+          injectPending(st);
+          continue;
+        }
+        break; // 참견 없음 — 종료
+      }
       st.running = false;
-      st.current = null;
+      st.actives.clear();
       setStatus(st, "대기");
     }
 
-    // 라이브 스트리밍 — 현재 화자의 agent_message_chunk 를 스트리밍 demux 로 거른다(태그 밖만 버블에 — 작업창에
-    // <회고> 원문 노출 0). 코어 dedup 일치: 최종 완결 재전송(누적과 동일) skip. 권위 분리는 완료 시 demux(r.text).
+    // 라이브 스트리밍 — 현재 화자의 agent_message_chunk 를 버블에 누적. 코어 dedup 일치(최종 완결 재전송, 누적
+    // 전체 1회) skip. 최종 권위 텍스트(또는 참견 부분)는 완료 시 runOneTurn 이 확정.
     function onStream(cur: Current, evt: any) {
       const u = evt?.update;
       if (!u || u.sessionUpdate !== "agent_message_chunk") return;
       const t = u.content?.text ?? "";
-      if (t !== "" && t === cur.liveRaw) return;
+      if (t !== "" && t === cur.liveRaw) return; // 최종 재전송 skip
       cur.liveRaw += t;
-      const workChunk = cur.demux.push(t);
-      if (workChunk) {
-        // 첫 실작업 청크에서 "응답 중…" 인디케이터 → 버블 생성(그 전까진 인디케이터 유지).
+      if (t) {
+        // 첫 청크에서 "응답 중…" 인디케이터 → 버블 생성(그 전까진 인디케이터 유지).
         if (!cur.bubble) cur.bubble = cur.row.toBubble();
-        cur.bubble.textContent = (cur.bubble.textContent || "") + workChunk;
+        cur.bubble.textContent = (cur.bubble.textContent || "") + t;
       }
     }
 
@@ -761,7 +643,9 @@ export default {
       const who = el("div", "st-who");
       const nameEl = elText("span", nameOf(agentId), "st-who-name");
       nameEl.style.color = COLOR[agentId] ?? "var(--fg3,#888)";
-      const timeEl = el("span", "st-who-time"); // 소요 시간(setElapsed 가 채움 — 관찰·디버깅)
+      const timeEl = el("span", "st-who-time"); // 발화 시작→종료 시각(관찰·디버깅)
+      const startStamp = hhmmss(); // 발화 시작(턴 시작) 시각 — 즉시 표시
+      timeEl.textContent = ` · ${startStamp}`;
       who.append(nameEl, timeEl);
       const pending = el("div", "st-pending");
       pending.append(el("span", "st-dot"), document.createTextNode("응답 중…"));
@@ -769,6 +653,7 @@ export default {
       st.msgs.appendChild(row);
       scroll(st);
       let body: HTMLElement = pending;
+      let endTimeEl: HTMLElement | null = null; // 현재 본문 박스의 우하단 종료시각 슬롯
       const swap = (next: HTMLElement) => {
         body.replaceWith(next);
         body = next;
@@ -776,19 +661,25 @@ export default {
       };
       return {
         toBubble(): HTMLElement {
-          const b = bubble("");
-          swap(b);
-          return b;
+          const box = el("div", "st-bubble");
+          const text = el("span", "st-bubble-text"); // 스트리밍·최종 텍스트는 여기(아래 time 슬롯 보존)
+          const time = el("span", "st-box-time"); // 우하단 종료 시각
+          box.append(text, time);
+          endTimeEl = time;
+          swap(box);
+          return text;
         },
         fail(reason: string) {
-          const f = el("div", "st-fail");
-          f.textContent = `⚠ ${reason}`;
-          f.title = reason; // 전문은 hover 로(여러 줄 stderr 보존)
-          swap(f);
+          const box = el("div", "st-fail");
+          box.title = reason; // 전문은 hover(여러 줄 stderr)
+          const time = el("span", "st-box-time");
+          box.append(elText("span", `⚠ ${reason}`, "st-fail-text"), time);
+          endTimeEl = time;
+          swap(box);
         },
-        // 발화 시각 — who 라인에 ' · 22:35:01'. 그냥 현재 시각을 찍는다(관찰·디버깅: 언제 발화했는지).
-        setTime() {
-          timeEl.textContent = ` · ${hhmmss()}`;
+        // 발화 종료 — 종료 시각을 버블/실패 박스 안 우하단에(시작 시각은 이름 옆에 이미 찍힘).
+        setEnd() {
+          if (endTimeEl) endTimeEl.textContent = hhmmss();
         },
         // 리소닝/띵킹(agent_thought_chunk) — 💭 배지(클릭하면 펼침). 작업 텍스트와 분리, 기본 접힘.
         setReasoning(text: string) {

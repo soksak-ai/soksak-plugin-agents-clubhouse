@@ -4,9 +4,9 @@
   "name": "ACP Studio",
   "version": "0.1.0",
   "repo": "https://github.com/soksak-ai/soksak-plugin-acp-studio.git",
-  "description": "여러 AI 코딩 에이전트(Claude·Codex·Gemini)를 한 워크스페이스에서 — 체크박스로 1~3 선택, 탭 순서 턴제 또는 자유 대화로 협업해 실파일 작업. 사교 공간(Clubhouse)은 에이전트가 자율로 남기는 회고·잡담. ACP 기반, acp-core 의존.",
+  "description": "여러 AI 코딩 에이전트(Claude·Codex·Gemini)를 한 워크스페이스에서 하나의 대화로 — 체크박스로 1~3 선택, 탭 순서대로 턴제·자유·동시 모드 협업해 실파일 작업. 본문 '@이름' 으로 동료 직접 호출. ACP 기반, acp-core 의존.",
   "entry": "main.js",
-  "permissions": ["ui", "commands", "storage", "programs", "fs:read"],
+  "permissions": ["ui", "commands", "programs", "fs:read"],
   "dependencies": { "soksak-plugin-acp-core": "^0.1.0" },
   "configuration": [
     {
@@ -21,11 +21,11 @@
     {
       "key": "kibitzDefault",
       "type": "enum",
-      "enum": ["turn", "free"],
-      "enumLabels": ["턴제(질서)", "자유 대화"],
+      "enum": ["turn", "free", "simul"],
+      "enumLabels": ["턴제(질서)", "자유 대화", "동시 발화"],
       "default": "turn",
-      "title": "참견 기본 모드",
-      "description": "새 워크스페이스의 대화 스타일 기본값 — 턴제(탭 순서 한 명씩) 또는 자유 대화(끼어들기 emergent)"
+      "title": "대화 기본 모드",
+      "description": "새 워크스페이스의 대화 스타일 기본값 — 턴제(탭 순서 한 명씩), 자유(라운드 반복), 동시(전원 병렬 발화)"
     },
     {
       "key": "nameTriggerDepthCap",
@@ -33,17 +33,8 @@
       "default": 4,
       "min": 1,
       "max": 20,
-      "title": "호명 연쇄 상한",
-      "description": "한 호명 스레드가 이어지는 최대 깊이(폭주 방지 안전판 — 강제 아님)"
-    },
-    {
-      "key": "mailboxSignal",
-      "type": "enum",
-      "enum": ["on", "off"],
-      "enumLabels": ["켜기", "끄기"],
-      "default": "on",
-      "title": "메시지함 알림",
-      "description": "Clubhouse 대화가 얽힐 때(호명 응답) 메시지함에 알림 발송(turn.signal). 구독한 프로젝트만 푸시 — 끄면 발송 안 함"
+      "title": "@멘션 연쇄 상한",
+      "description": "한 @지목 스레드가 이어지는 최대 깊이(폭주 방지 안전판 — 강제 아님)"
     }
   ],
   "contributes": {
@@ -54,20 +45,13 @@
         "icon": "🎛️",
         "placements": ["content"],
         "defaultPlacement": "content"
-      },
-      {
-        "id": "clubhouse",
-        "title": "Clubhouse",
-        "icon": "🛋️",
-        "placements": ["content"]
       }
     ],
     "commands": [
       { "name": "send", "title": "활성 Studio 에 사람 메시지 전송(라이브 구동·자동화)" },
+      { "name": "state", "title": "활성 Studio 라이브 상태(스트리밍 길이 등 — 관찰·E2E)" },
       { "name": "ask", "title": "프롬프트 1회(단일 에이전트, 헤드리스)" },
-      { "name": "converse", "title": "다중 에이전트 1교환(턴테이킹, 헤드리스 E2E)" },
-      { "name": "clubhouse.feed", "title": "Clubhouse 피드 읽기" },
-      { "name": "clubhouse.clear", "title": "Clubhouse 피드 비우기" }
+      { "name": "converse", "title": "다중 에이전트 1교환(턴테이킹, 헤드리스 E2E)" }
     ],
     "programs": [
       {
@@ -76,13 +60,6 @@
         "path": { "ko": "유틸리티", "en": "Utility" },
         "kind": "view",
         "view": "studio"
-      },
-      {
-        "id": "acp-clubhouse",
-        "title": "Clubhouse",
-        "path": { "ko": "유틸리티", "en": "Utility" },
-        "kind": "view",
-        "view": "clubhouse"
       }
     ]
   }
