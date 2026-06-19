@@ -62,6 +62,11 @@
       { "name": "ask", "title": "프롬프트 1회(단일 에이전트, 헤드리스)" },
       { "name": "converse", "title": "다중 에이전트 1교환(턴테이킹, 헤드리스 E2E)" }
     ],
+    "nodes": [
+      { "id": "send", "description": "전송 버튼" },
+      { "id": "input", "description": "메시지 입력" },
+      { "id": "tab", "description": "에이전트 탭(체크·드래그)" }
+    ],
     "programs": [
       {
         "id": "acp-studio",
