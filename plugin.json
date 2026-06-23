@@ -142,6 +142,13 @@
           "en": "Tower Trace (session plan/step history)",
           "ko": "컨트롤 타워 trace(세션 plan·step·결과 이력 조회)"
         }
+      },
+      {
+        "name": "tower.scan",
+        "title": {
+          "en": "Tower Scan (untrusted-content injection scanner, headless)",
+          "ko": "컨트롤 타워 스캔(비신뢰 콘텐츠 주입 시그니처 검사, M10)"
+        }
       }
     ],
     "nodes": [

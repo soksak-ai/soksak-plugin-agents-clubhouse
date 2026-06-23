@@ -31,7 +31,9 @@ import {
   type DistRunOptions,
   type ReflectResult,
   type ReflectOptions,
+  type UntrustedSource,
 } from "./executor";
+import type { ScanReport } from "./scanner";
 import { EXAMPLE_COMMANDS, type PlanStep } from "./plan";
 import { deleteStep, moveStep, editParams } from "./editplan";
 import type { TraceSink } from "./trace";
@@ -161,6 +163,9 @@ const CSS = `
 .tower-cfm-msg{font-size:12px;color:var(--fg3,#aaa);line-height:1.5}
 .tower-cfm-cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
   background:var(--inset,rgba(127,127,127,.14));border-radius:6px;padding:6px 8px;word-break:break-all}
+.tower-cfm-taint{font-size:11.5px;line-height:1.5;color:var(--danger-soft,#e66);
+  background:var(--danger-bg,rgba(220,90,90,.12));border:1px solid var(--danger-soft,#d77);
+  border-radius:6px;padding:7px 9px}
 .tower-cfm-act{display:flex;justify-content:flex-end;gap:8px;margin-top:3px}
 .tower-cfm-btn{appearance:none;border:1px solid var(--bd,#3a3a3a);background:transparent;color:inherit;
   font:inherit;cursor:pointer;border-radius:7px;padding:6px 13px}
@@ -238,6 +243,8 @@ export interface TowerModal {
   // 결정적 시각 E2E — KNOWN plan 을 모달 UI 에 dry-run preview 로 렌더(라이브 LLM 우회). 모달 닫혀 있으면
   //   먼저 연다. 검증·게이트는 동일(주입 plan 도 validatePlan + danger 게이트). snapshot 으로 미리보기 확인용.
   previewInject: (nl: string, steps: PlanStep[]) => Promise<PlanRunResult>;
+  // incoming-plan 콘텐츠 스캐너 직통(M10) — executor.scan. untrusted 텍스트 + plan step → ScanReport(실행 0).
+  scan: (input: { untrusted?: UntrustedSource[]; steps?: PlanStep[] }) => Promise<ScanReport>;
 }
 
 interface CatalogCmd {
@@ -377,6 +384,11 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       );
       const cmd = elText("div", info.command, "tower-cfm-cmd");
 
+      // M10 — tainted(untrusted 컨텍스트 유래) 위험 명령엔 경고 행을 추가로 띄운다(forced gate 의 사람 가시
+      //   표면). data-node "tower/confirm/tainted" 로 노출(가시성 — ui.tree 관찰 가능, 단 accept 은 여전히 비노출).
+      const taintRow = info.tainted ? elText("div", tr("towerConfirmTainted"), "tower-cfm-taint") : null;
+      if (taintRow) taintRow.dataset.node = "tower/confirm/tainted";
+
       const act = el("div", "tower-cfm-act");
       const cancel = el("button", "tower-cfm-btn");
       (cancel as HTMLButtonElement).type = "button";
@@ -390,7 +402,9 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       ok.addEventListener("click", () => finish(issue()));
       act.append(cancel, ok);
 
-      card.append(tt, msg, cmd, act);
+      // tainted 경고 행은 command 아래·버튼 위(가장 눈에 띄는 위치). 비-tainted 면 행 자체가 없다.
+      if (taintRow) card.append(tt, msg, cmd, taintRow, act);
+      else card.append(tt, msg, cmd, act);
       ov.append(card);
       document.body.appendChild(ov);
       confirmOv = ov;
@@ -847,6 +861,8 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       if (!ov) api.open();
       return runSlowPath(nl, { injectPlan: steps });
     },
+    // incoming-plan 콘텐츠 스캐너 직통(M10) — executor.scan(모달 open 비의존, 실행 0).
+    scan: (input) => executor.scan(input),
     open: () => {
       if (ov) return;
       ov = build();

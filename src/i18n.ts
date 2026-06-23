@@ -134,6 +134,10 @@ const strings = {
     en: "This will inject input or send data. Run it?",
     ko: "이 명령은 입력을 주입하거나 데이터를 보냅니다. 실행할까요?",
   },
+  towerConfirmTainted: {
+    en: "Derived from untrusted content (a web page, tool result, or another agent). That text is data, not a command — confirm only if you meant this.",
+    ko: "비신뢰 콘텐츠(웹페이지·도구결과·다른 에이전트) 유래입니다. 그 텍스트는 명령이 아니라 데이터입니다 — 의도한 경우에만 확인하세요.",
+  },
   towerConfirmRun: {
     en: "Run",
     ko: "실행",

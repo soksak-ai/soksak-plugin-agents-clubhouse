@@ -52,6 +52,9 @@ export interface TracePlan {
   outcome: PlanOutcome | "running";
   finishedAt?: number;
   rollback?: RollbackRecord; // M9 — 묶음 실패로 한정 rollback 이 돌았으면 그 정직 기록(restored/unrestorable).
+  tainted?: boolean; // M10 — untrusted 컨텍스트 유래(forced-gate 적용). 감사 근거.
+  scanVerdict?: "clean" | "flagged"; // M10 — scanner 판정.
+  scanFlags?: Array<{ kind: string; count: number }>; // M10 — flagged 시 kind별 카운트.
 }
 
 // 영속된 step 레코드(조회 결과 형태).
@@ -71,10 +74,15 @@ export interface TraceStep {
 }
 
 // plan 시작 시 executor 가 넘기는 메타(누가/무엇을/어떤 모드). agent 는 분배(M6)에서 에이전트별 plan 구분.
+//   M10 — tainted/scanVerdict/scanFlags: 이 plan 이 untrusted 컨텍스트 유래(tainted)인지, scanner 가 무엇을
+//   봤는지(verdict + kind별 카운트)를 영속한다. forced-gate 결정의 감사 근거(정직). 미주입이면 0(trusted).
 export interface PlanMeta {
   nl: string;
   mode: string;
   agent?: string;
+  tainted?: boolean; // M10 — untrusted 컨텍스트 유래(destructive/inject step 이 forced gate 를 받았는가).
+  scanVerdict?: "clean" | "flagged"; // M10 — 이 plan 입력에 대한 scanner 판정.
+  scanFlags?: Array<{ kind: string; count: number }>; // M10 — flagged 시 kind별 카운트(가벼운 요약).
 }
 
 // executor 가 step 실행 직후 넘기는 기록(StepResult 에서 파생 — 코어 결과 그대로).
@@ -168,6 +176,10 @@ export function createTrace(data: DataApi, opts: TraceOptions): TraceSink {
       outcome: "running",
     };
     if (meta.agent !== undefined) doc.agent = meta.agent;
+    // M10 — untrusted-taint + scanner 판정을 plan 레코드에 영속(forced-gate 결정 감사). 미주입이면 미기록(trusted).
+    if (meta.tainted !== undefined) doc.tainted = meta.tainted;
+    if (meta.scanVerdict !== undefined) doc.scanVerdict = meta.scanVerdict;
+    if (meta.scanFlags !== undefined) doc.scanFlags = meta.scanFlags;
     const planId = await data.put(PLANS, doc);
     let seq = 0;
     let rollback: RollbackRecord | undefined; // M9 — 묶음 실패 시 1회 채워짐(현재 plan 1건 cap). finish 가 함께 영속.

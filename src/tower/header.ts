@@ -7,9 +7,10 @@
 // data-node 주소(titlebar/<pluginId>/tower)는 코어가 자동 부여 — ui.tree/ui.input.click 으로 검증.
 
 import { createTowerModal, type TowerModal } from "./modal";
-import type { Planner, PlanRunResult, PlanRunOptions, DistRunResult, DistRunOptions, ReflectResult, ReflectOptions } from "./executor";
+import type { Planner, PlanRunResult, PlanRunOptions, DistRunResult, DistRunOptions, ReflectResult, ReflectOptions, UntrustedSource } from "./executor";
 import type { PlanStep } from "./plan";
 import type { TraceSink } from "./trace";
+import type { ScanReport } from "./scanner";
 
 // ✦ — Lucide 'sparkle' 아웃라인(단일 4-point). 24 viewBox, currentColor stroke, fill 없음.
 //   다른 타이틀바 아이콘(sun/settings/panel-left)과 동일 기하라 단색 아웃라인으로 자연히 어울린다.
@@ -28,6 +29,8 @@ export interface TowerHandle {
   reflectAndRun: (nl: string, opts?: ReflectOptions) => Promise<ReflectResult>;
   // 결정적 시각 E2E — 모달 UI 에 KNOWN plan dry-run preview 렌더(snapshot 확인용).
   previewInject: (nl: string, steps: PlanStep[]) => Promise<PlanRunResult>;
+  // incoming-plan 콘텐츠 스캐너 직통(M10) — 노출 command tower.scan 이 헤드리스로 자가검증(실행 0).
+  scan: (input: { untrusted?: UntrustedSource[]; steps?: PlanStep[] }) => Promise<ScanReport>;
 }
 
 // 타워 타이틀바 액션 + 모달(본문 포함)을 설치한다. 액션 클릭이 모달을 토글하고, active 가 열림 상태를 반영.
@@ -61,6 +64,7 @@ export function setupTower(app: any, label: string, lang: () => string, planner?
     distributeAndRun: (nl: string, opts: DistRunOptions) => modal.distributeAndRun(nl, opts),
     reflectAndRun: (nl: string, opts?: ReflectOptions) => modal.reflectAndRun(nl, opts),
     previewInject: (nl: string, steps: PlanStep[]) => modal.previewInject(nl, steps),
+    scan: (input) => modal.scan(input),
     dispose: () => {
       unregister?.();
       modal.dispose();
