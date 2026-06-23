@@ -32,11 +32,15 @@ import {
   type ReflectResult,
   type ReflectOptions,
   type UntrustedSource,
+  type MacroProposal,
+  type MacroRunResult,
+  type CommitOptions,
 } from "./executor";
 import type { ScanReport } from "./scanner";
 import { EXAMPLE_COMMANDS, type PlanStep } from "./plan";
 import { deleteStep, moveStep, editParams } from "./editplan";
 import type { TraceSink } from "./trace";
+import type { Macro, MacroSink } from "./macro";
 
 // 라이브칸이 구독하는 stable bus 토픽 — Clubhouse 런타임(main.ts)이 스트림 단일 진실에서 재방송한다.
 //   acp.update.<connId> 는 connId 별이라 모달이 직접 못 잡는다 → main.ts onStream 이 이 토픽으로 relay(이벤트-우선).
@@ -141,6 +145,18 @@ const CSS = `
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .tower-cmd-dg{flex:0 0 auto;color:var(--danger-soft,#d77);font-size:11px}
 .tower-empty{font-size:11.5px;color:var(--fg3,#888);padding:8px 9px}
+/* 매크로 fast-path 행(M11) — 저장된 명명 callable. 예시행 룩 + ★ 명명 표식 + ✕ forget */
+.tower-macros{display:flex;flex-direction:column;gap:5px}
+.tower-macro{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;
+  border:1px solid var(--acc,#7aa2f7);background:var(--accbg,rgba(122,162,247,.10));cursor:pointer;
+  text-align:left;color:inherit;font:inherit}
+.tower-macro:hover{background:var(--accbg,rgba(122,162,247,.18))}
+.tower-macro-ic{flex:0 0 auto;color:var(--acc,#7aa2f7);font-size:12px}
+.tower-macro-tt{flex:1 1 auto;min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tower-macro-go{flex:0 0 auto;font-size:11px;color:var(--fg3,#888)}
+.tower-macro-x{flex:0 0 auto;appearance:none;border:0;background:transparent;color:var(--fg3,#888);
+  font:inherit;font-size:12px;cursor:pointer;border-radius:5px;padding:1px 5px;line-height:1}
+.tower-macro-x:hover{color:var(--danger-soft,#e66);background:var(--danger-bg,rgba(220,90,90,.14))}
 /* 라이브칸 — Clubhouse st-bubble 룩 재사용 */
 .tower-live-hd{padding:9px 11px;border-bottom:1px solid var(--bd,#3a3a3a);font-size:10.5px;font-weight:700;
   letter-spacing:.04em;text-transform:uppercase;color:var(--fg3,#888);flex:0 0 auto}
@@ -221,6 +237,7 @@ export interface TowerModalDeps {
   app: any; // ctx.app — commands.execute(팔레트) · events.on(재fetch) · bus.on(라이브)
   planner?: Planner; // slow-path planning 턴 seam — 없으면 NL Enter 모호 입력이 NO_PLANNER 보고
   trace?: TraceSink; // 세션/trace 영속(M7, app.data) — executor 로 전달. 없으면 영속 0(순수 동작).
+  macros?: MacroSink; // 명명 매크로 영속(M11, app.data) — executor 로 전달. 없으면 매크로 비활성.
   onChange?: () => void; // 열림/닫힘 변화 단일 채널(헤더 active 동기화, 이벤트-우선)
 }
 
@@ -245,6 +262,12 @@ export interface TowerModal {
   previewInject: (nl: string, steps: PlanStep[]) => Promise<PlanRunResult>;
   // incoming-plan 콘텐츠 스캐너 직통(M10) — executor.scan. untrusted 텍스트 + plan step → ScanReport(실행 0).
   scan: (input: { untrusted?: UntrustedSource[]; steps?: PlanStep[] }) => Promise<ScanReport>;
+  // ── M11: 매크로 승격(반복 NL→plan 을 명명 fast-path 로) — executor 직통 ──
+  proposeMacro: (threshold?: number) => Promise<MacroProposal>;
+  saveMacro: (input: { name: string; trigger: string; steps: PlanStep[]; tainted?: boolean; scanVerdict?: "clean" | "flagged" }) => Promise<Macro | null>;
+  runMacro: (name: string, opts?: CommitOptions) => Promise<MacroRunResult>;
+  listMacros: () => Promise<Macro[]>;
+  forgetMacro: (name: string) => Promise<boolean>;
 }
 
 interface CatalogCmd {
@@ -332,6 +355,9 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
   // 본문 라이프사이클(open 마다 새로) — 구독 해지(호스트 Disposable)·필터·라이브 상태.
   let subs: Array<{ dispose: () => void }> = [];
   let palWrap: HTMLElement | null = null;
+  let macroWrap: HTMLElement | null = null; // M11 — 저장된 매크로 fast-path 행 컨테이너(NL 바·예시행 사이).
+  let macroSec: HTMLElement | null = null; // 매크로 섹션 라벨(매크로 0건이면 라벨·컨테이너 숨김).
+  let macroCache: Macro[] = []; // 저장된 매크로 캐시(open 시 1회 fetch + save/forget 이벤트 시 재fetch).
   let liveBox: HTMLElement | null = null;
   let nlInput: HTMLInputElement | null = null;
   let planBox: HTMLElement | null = null; // dry-run plan 미리보기 슬롯(NL 바 아래, 예시행 위)
@@ -414,7 +440,7 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
 
   // executor = 유일 실행점. 모달은 클릭을 여기로 넘기고 결과만 라이브칸에 반영(로직 누수 0, RULE 6).
   //   trace(M7) 주입 — executor 가 commit/discard 시 app.data 에 plan·step·outcome 을 영속(이벤트-우선).
-  const executor: TowerExecutor = createExecutor({ app, confirmGate, lang, planner: deps.planner, trace: deps.trace });
+  const executor: TowerExecutor = createExecutor({ app, confirmGate, lang, planner: deps.planner, trace: deps.trace, macros: deps.macros });
 
   // 실행 결과를 라이브칸 시스템 버블로 — 폴링 0, 사람 가시 피드백.
   function reportOutcome(label: string, r: { ok: boolean; code?: string }): void {
@@ -478,6 +504,57 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
     }
   }
 
+  // ── 매크로 fast-path 행(M11, 이벤트-우선 RULE 7) — 저장된 매크로를 팔레트 위 별도 섹션으로 노출(RULE 8) ──
+  //   open 시 1회 fetch + save/forget 후 재fetch(레지스트리-변경 이벤트 없으니 명시 재fetch = 정공법, 폴링 0).
+  //   각 행 = 클릭하면 executor.runMacro(name)(0 planner fast-path, danger step 은 confirm 게이트 그대로).
+  async function fetchMacros(): Promise<void> {
+    try {
+      macroCache = deps.macros ? await executor.listMacros() : [];
+    } catch {
+      macroCache = []; // 거부/오류 — 빈 매크로(가짜 행 0).
+    }
+    renderMacros();
+  }
+
+  function renderMacros(): void {
+    const wrap = macroWrap;
+    const sec = macroSec;
+    if (!wrap || !sec) return;
+    const q = (nlInput?.value ?? "").trim().toLowerCase();
+    const rows = macroCache.filter((m) => !q || m.name.toLowerCase().includes(q) || m.trigger.toLowerCase().includes(q));
+    wrap.replaceChildren();
+    // 매크로 0건이면 섹션 자체를 숨긴다(빈 라벨 잡음 0). 검색으로 0이어도 매크로가 있으면 섹션은 유지.
+    const hidden = macroCache.length === 0;
+    sec.style.display = hidden ? "none" : "";
+    wrap.style.display = hidden ? "none" : "";
+    for (const m of rows) {
+      const row = el("button", "tower-macro");
+      (row as HTMLButtonElement).type = "button";
+      row.dataset.node = `tower/macro/${m.name}`; // RULE 8 — 매크로 행 전수 노출(주소 chrome/tower/macro/<name>)
+      row.append(elText("span", "★", "tower-macro-ic")); // 명명 fast-path 표식(예시행 ✦ 와 구분).
+      const tt = elText("span", m.name, "tower-macro-tt");
+      tt.title = m.trigger; // hover 로 원 trigger(NL) 노출.
+      row.append(tt);
+      row.append(elText("span", "⏎", "tower-macro-go"));
+      // 삭제 — forget. 행 안의 작은 ✕(전수 노출). stopPropagation 으로 실행과 분리.
+      const del = el("button", "tower-macro-x");
+      (del as HTMLButtonElement).type = "button";
+      del.textContent = "✕";
+      del.title = tr("towerMacroForget");
+      del.dataset.node = `tower/macro/${m.name}/forget`; // RULE 8
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void executor.forgetMacro(m.name).then(() => fetchMacros());
+      });
+      row.append(del);
+      // 클릭 = runMacro(0 planner fast-path). danger step 은 executor confirm 게이트 그대로(우회 0).
+      row.addEventListener("click", () => {
+        void executor.runMacro(m.name).then((r) => reportOutcome(m.name, { ok: r.ok, code: (r as any).code }));
+      });
+      wrap.appendChild(row);
+    }
+  }
+
   // ── NL 바 Enter(M5) — fast-path/slow-path 분기 단일 진입점 ──
   //   1) 입력이 예시행 문구/팔레트 command 와 EXACT-매치면 fast-path(M4) — 에이전트 우회 즉답.
   //   2) 아니면 slow-path — executor.planAndRun(도메인맵 라이브 주입 planning 턴) → dry-run preview.
@@ -502,6 +579,21 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       renderPalette();
       void executor.runCommand(cmd.name).then((r) => reportOutcome(cmd.name, r));
       return;
+    }
+    // 1b) 매크로 EXACT 매치(M11) — 입력이 저장된 매크로 이름 또는 원 trigger(NL) 와 정확매치면 그 매크로
+    //   fast-path 실행(0 planner). slow-path planning 턴 앞 — 학습된 명명 callable 이 즉시 재실행된다.
+    //   매크로 캐시(open 시 fetch)에서 이름/trigger 정확매치를 찾아 그 이름으로 runMacro(재검증·게이트 포함).
+    if (deps.macros) {
+      const macro = macroCache.find((m) => m.name === raw || m.trigger.trim() === raw);
+      if (macro) {
+        if (nlInput) nlInput.value = "";
+        clearPlanPreview();
+        renderPalette();
+        const r = await executor.runMacro(macro.name); // 0 planner — 저장된 step 재검증 후 SAME dispatchPlan/gate.
+        renderMacros();
+        reportOutcome(macro.name, { ok: r.ok, code: (r as any).code });
+        return;
+      }
     }
     // 2) slow-path — 모호 NL → planning 턴 → dry-run preview.
     await runSlowPath(raw);
@@ -762,7 +854,10 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
     input.className = "tower-in";
     input.placeholder = tr("towerInputPlaceholder");
     input.dataset.node = "tower/input"; // RULE 8
-    input.addEventListener("input", () => renderPalette()); // 타이핑 = 라이브 검색(이벤트-우선)
+    input.addEventListener("input", () => {
+      renderPalette();
+      renderMacros();
+    }); // 타이핑 = 라이브 검색(팔레트 + 매크로 둘 다, 이벤트-우선)
     input.addEventListener("keydown", (e) => {
       // Enter = executor 진입점(M5) — fast-path EXACT 매치면 즉답, 아니면 slow-path dry-run. 실행은 모두
       //   executor 단일 실행점 경유(danger 게이트 포함). slow-path 는 dry-run 우선이라 여기서 직접 디스패치 0.
@@ -780,6 +875,14 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
     plan.dataset.node = "tower/plan"; // RULE 8 — plan 미리보기 영역 노출(비어 있어도 주소 존재)
     planBox = plan;
     main.appendChild(plan);
+
+    // 매크로 섹션(M11) — 저장된 명명 fast-path 행. 매크로 0건이면 라벨·컨테이너 둘 다 숨김(renderMacros).
+    const mSec = elText("div", tr("towerMacrosTitle"), "tower-sec");
+    macroSec = mSec;
+    main.appendChild(mSec);
+    const macros = el("div", "tower-macros");
+    macroWrap = macros;
+    main.appendChild(macros);
 
     // 예시행 섹션 — 클릭 = NL 바 채움(실행 X).
     main.appendChild(elText("div", tr("towerExamplesTitle"), "tower-sec"));
@@ -863,6 +966,20 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
     },
     // incoming-plan 콘텐츠 스캐너 직통(M10) — executor.scan(모달 open 비의존, 실행 0).
     scan: (input) => executor.scan(input),
+    // ── M11: 매크로 승격 — executor 직통. save/forget 후 열려 있으면 매크로 행 재렌더(이벤트-우선 RULE 7) ──
+    proposeMacro: (threshold) => executor.proposeMacro(threshold),
+    saveMacro: async (input) => {
+      const m = await executor.saveMacro(input);
+      if (ov) await fetchMacros(); // 저장 후 팔레트에 즉시 반영(열려 있을 때만).
+      return m;
+    },
+    runMacro: (name, opts) => executor.runMacro(name, opts),
+    listMacros: () => executor.listMacros(),
+    forgetMacro: async (name) => {
+      const ok = await executor.forgetMacro(name);
+      if (ov) await fetchMacros(); // 삭제 후 행 제거 반영.
+      return ok;
+    },
     open: () => {
       if (ov) return;
       ov = build();
@@ -872,6 +989,7 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       subs.push(app.events.on("theme.changed", () => fetchCatalog()));
       subs.push(app.events.on("locale.changed", () => fetchCatalog()));
       void fetchCatalog(); // open 시 1회 — 레지스트리-변경 이벤트가 없으므로 정공법(RULE 7 fallback)
+      void fetchMacros(); // M11 — open 시 1회 매크로 fetch(save/forget 후 명시 재fetch). 폴링 0.
       emit();
     },
     close: () => {
@@ -890,10 +1008,11 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       confirmOv = null;
       ov.remove();
       ov = null;
-      palWrap = liveBox = planBox = null;
+      palWrap = liveBox = planBox = macroWrap = macroSec = null;
       nlInput = null;
       planning = false;
       catalog = [];
+      macroCache = [];
       liveActive = null;
       emit();
     },
@@ -914,9 +1033,10 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       confirmOv = null;
       ov?.remove();
       ov = null;
-      palWrap = liveBox = planBox = null;
+      palWrap = liveBox = planBox = macroWrap = macroSec = null;
       nlInput = null;
       planning = false;
+      macroCache = [];
     },
   };
   return api;

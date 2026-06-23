@@ -7,9 +7,10 @@
 // data-node 주소(titlebar/<pluginId>/tower)는 코어가 자동 부여 — ui.tree/ui.input.click 으로 검증.
 
 import { createTowerModal, type TowerModal } from "./modal";
-import type { Planner, PlanRunResult, PlanRunOptions, DistRunResult, DistRunOptions, ReflectResult, ReflectOptions, UntrustedSource } from "./executor";
+import type { Planner, PlanRunResult, PlanRunOptions, DistRunResult, DistRunOptions, ReflectResult, ReflectOptions, UntrustedSource, MacroProposal, MacroRunResult, CommitOptions } from "./executor";
 import type { PlanStep } from "./plan";
 import type { TraceSink } from "./trace";
+import type { Macro, MacroSink } from "./macro";
 import type { ScanReport } from "./scanner";
 
 // ✦ — Lucide 'sparkle' 아웃라인(단일 4-point). 24 viewBox, currentColor stroke, fill 없음.
@@ -31,6 +32,12 @@ export interface TowerHandle {
   previewInject: (nl: string, steps: PlanStep[]) => Promise<PlanRunResult>;
   // incoming-plan 콘텐츠 스캐너 직통(M10) — 노출 command tower.scan 이 헤드리스로 자가검증(실행 0).
   scan: (input: { untrusted?: UntrustedSource[]; steps?: PlanStep[] }) => Promise<ScanReport>;
+  // ── M11: 매크로 승격 — 노출 command tower.macro 가 헤드리스로 구동(save/run/list/forget + propose) ──
+  proposeMacro: (threshold?: number) => Promise<MacroProposal>;
+  saveMacro: (input: { name: string; trigger: string; steps: PlanStep[]; tainted?: boolean; scanVerdict?: "clean" | "flagged" }) => Promise<Macro | null>;
+  runMacro: (name: string, opts?: CommitOptions) => Promise<MacroRunResult>;
+  listMacros: () => Promise<Macro[]>;
+  forgetMacro: (name: string) => Promise<boolean>;
 }
 
 // 타워 타이틀바 액션 + 모달(본문 포함)을 설치한다. 액션 클릭이 모달을 토글하고, active 가 열림 상태를 반영.
@@ -39,10 +46,11 @@ export interface TowerHandle {
 // planner = slow-path planning 턴 seam(main.ts 가 Clubhouse 엔진 requestPlan 으로 주입) — 없으면 모달이
 //   slow-path 를 NO_PLANNER 로 보고(에이전트 미연결 시 정직하게).
 // trace = 세션/trace 영속 sink(M7, app.data) — 모달 → executor 로 전달. 없으면 영속 0.
-export function setupTower(app: any, label: string, lang: () => string, planner?: Planner, trace?: TraceSink): TowerHandle {
+// macros = 명명 매크로 영속 sink(M11, app.data) — 모달 → executor 로 전달. 없으면 매크로 비활성.
+export function setupTower(app: any, label: string, lang: () => string, planner?: Planner, trace?: TraceSink, macros?: MacroSink): TowerHandle {
   // 모달 상태 변화(열림/닫힘)는 onChange 한 채널로만 헤더 active 에 반영한다(이벤트-우선, 폴링 0).
   //   호출원(아이콘 클릭·닫기버튼·프로그램·향후 ⌘K) 무관하게 active 가 항상 정확.
-  const modal: TowerModal = createTowerModal({ title: label, lang, app, planner, trace, onChange: () => render() });
+  const modal: TowerModal = createTowerModal({ title: label, lang, app, planner, trace, macros, onChange: () => render() });
 
   // active 토글 상태를 액션에 반영하려면 같은 id 로 재등록한다(headerActions 가 id 교체 = 갱신).
   let unregister: (() => void) | null = null;
@@ -65,6 +73,11 @@ export function setupTower(app: any, label: string, lang: () => string, planner?
     reflectAndRun: (nl: string, opts?: ReflectOptions) => modal.reflectAndRun(nl, opts),
     previewInject: (nl: string, steps: PlanStep[]) => modal.previewInject(nl, steps),
     scan: (input) => modal.scan(input),
+    proposeMacro: (threshold) => modal.proposeMacro(threshold),
+    saveMacro: (input) => modal.saveMacro(input),
+    runMacro: (name, opts) => modal.runMacro(name, opts),
+    listMacros: () => modal.listMacros(),
+    forgetMacro: (name) => modal.forgetMacro(name),
     dispose: () => {
       unregister?.();
       modal.dispose();

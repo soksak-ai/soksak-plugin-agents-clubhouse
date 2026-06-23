@@ -214,6 +214,14 @@ const strings = {
     en: "Invalid JSON params — kept previous value.",
     ko: "잘못된 JSON 파라미터 — 이전 값 유지.",
   },
+  towerMacrosTitle: {
+    en: "Macros — saved fast-paths",
+    ko: "매크로 — 저장된 fast-path",
+  },
+  towerMacroForget: {
+    en: "Forget macro",
+    ko: "매크로 삭제",
+  },
 } as const;
 
 export type I18nKey = keyof typeof strings;

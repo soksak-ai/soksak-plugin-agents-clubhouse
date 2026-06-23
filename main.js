@@ -269,6 +269,14 @@ var strings = {
   towerPlanBadJson: {
     en: "Invalid JSON params \u2014 kept previous value.",
     ko: "\uC798\uBABB\uB41C JSON \uD30C\uB77C\uBBF8\uD130 \u2014 \uC774\uC804 \uAC12 \uC720\uC9C0."
+  },
+  towerMacrosTitle: {
+    en: "Macros \u2014 saved fast-paths",
+    ko: "\uB9E4\uD06C\uB85C \u2014 \uC800\uC7A5\uB41C fast-path"
+  },
+  towerMacroForget: {
+    en: "Forget macro",
+    ko: "\uB9E4\uD06C\uB85C \uC0AD\uC81C"
   }
 };
 function t(key, lang) {
@@ -895,6 +903,121 @@ function scanIncoming(input, ctx = {}) {
   return { flags: all, bySource, verdict: all.length ? "flagged" : "clean" };
 }
 
+// src/tower/macro.ts
+var MACROS = "tower_macros";
+var MACROS_SCHEMA = { indexes: ["sessionId", "name", "createdAt"] };
+function normalizeNl(nl) {
+  return nl.trim().toLowerCase().replace(/\s+/g, " ");
+}
+function stepSignature(s) {
+  if (s.axis === "dom") return `dom|${s.name}|${s.address ?? ""}`;
+  const p = s.params && typeof s.params === "object" ? stableStringify(s.params) : "";
+  return `${s.axis}|${s.name}|${p}`;
+}
+function planSignature(nl, steps) {
+  return `${normalizeNl(nl)}::${steps.map(stepSignature).join(">>")}`;
+}
+function stableStringify(v) {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(v).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(",")}}`;
+}
+function promotable(p) {
+  if (p.tainted) return false;
+  if (p.scanVerdict === "flagged") return false;
+  return true;
+}
+function detectPromotion(observations, threshold = 3) {
+  const acc = /* @__PURE__ */ new Map();
+  let order = 0;
+  let winner = null;
+  for (const o of observations) {
+    if (!promotable(o)) continue;
+    const sig = planSignature(o.nl, o.steps);
+    let e2 = acc.get(sig);
+    if (!e2) {
+      e2 = { count: 0, trigger: o.nl.trim(), steps: o.steps, reachedAt: -1 };
+      acc.set(sig, e2);
+    }
+    e2.count++;
+    if (e2.count === threshold) {
+      e2.reachedAt = order++;
+      if (!winner || e2.reachedAt < winner.reachedAt) winner = { signature: sig, reachedAt: e2.reachedAt };
+    }
+  }
+  if (!winner) return { proposed: false };
+  const e = acc.get(winner.signature);
+  return { proposed: true, trigger: e.trigger, steps: e.steps, count: e.count, signature: winner.signature };
+}
+function createMacroStore(data, opts) {
+  const now = opts.now ?? (() => Date.now());
+  const sessionId = opts.sessionId;
+  let defined = null;
+  const ensureDefined = () => {
+    if (!defined) {
+      defined = (async () => {
+        await data.define(MACROS, MACROS_SCHEMA);
+      })().catch(() => {
+      });
+    }
+    return defined;
+  };
+  async function findByName(name) {
+    await ensureDefined();
+    const rows = await data.query(MACROS, { where: { sessionId, name }, limit: 1 });
+    return rows[0] ?? null;
+  }
+  async function save(m) {
+    await ensureDefined();
+    const existing = await findByName(m.name);
+    const createdAt = existing?.createdAt ?? now();
+    const doc = {
+      sessionId,
+      name: m.name,
+      trigger: m.trigger,
+      steps: m.steps,
+      createdAt
+    };
+    const id = await data.put(MACROS, doc, existing ? { id: existing.id } : void 0);
+    return { id, name: m.name, trigger: m.trigger, steps: m.steps, createdAt };
+  }
+  async function byName(name) {
+    return findByName(name);
+  }
+  async function byTrigger(trigger) {
+    await ensureDefined();
+    const rows = await data.query(MACROS, { where: { sessionId, trigger }, limit: 1 });
+    return rows[0] ?? null;
+  }
+  async function list() {
+    await ensureDefined();
+    const rows = await data.query(MACROS, { where: { sessionId }, order: "createdAt", desc: false, limit: 1e3 });
+    return rows;
+  }
+  async function forget(name) {
+    const existing = await findByName(name);
+    if (!existing) return false;
+    await data.put(MACROS, { sessionId, name, forgotten: true, createdAt: existing.createdAt }, { id: existing.id });
+    return true;
+  }
+  const isLive = (m) => m && !m.forgotten && typeof m.name === "string" && Array.isArray(m.steps);
+  return {
+    sessionId,
+    save,
+    byName: async (name) => {
+      const m = await byName(name);
+      return isLive(m) ? m : null;
+    },
+    byTrigger: async (trigger) => {
+      const m = await byTrigger(trigger);
+      return isLive(m) ? m : null;
+    },
+    list: async () => (await list()).filter(isLive),
+    forget
+  };
+}
+
 // src/tower/executor.ts
 function flagSummary(scan) {
   const counts = /* @__PURE__ */ new Map();
@@ -1311,6 +1434,14 @@ function createExecutor(deps) {
     const result = await dispatchPlan(steps, { tainted }, tr);
     return { result, finish: (outcome) => tr.finish(outcome) };
   }
+  async function dispatchTracedOpts(steps, meta, copts) {
+    const sink = deps.trace;
+    if (!sink || !meta) return { result: await dispatchPlan(steps, copts) };
+    const tr = await sink.begin(meta);
+    const result = await dispatchPlan(steps, copts, tr);
+    await tr.finish(result.yielded ? "yielded" : result.ok ? "committed" : "failed");
+    return { result };
+  }
   async function reflectAndRun(nl, opts = {}) {
     const planner = opts.planner ?? deps.planner;
     if (!planner) {
@@ -1407,7 +1538,86 @@ function createExecutor(deps) {
     const map = await fetchDomainMap();
     return scanIncoming({ untrusted: input.untrusted, steps: input.steps }, scanCtx(map));
   }
-  const api = { runExample, runCommand, runDom, runPlan, planAndRun, revalidateAndRun, distributeAndRun, reflectAndRun, scan };
+  async function proposeMacro(threshold = 3) {
+    const sink = deps.trace;
+    if (!sink) return { proposed: false };
+    const plans = await sink.recentPlans({ limit: 200 });
+    const observations = [];
+    for (const p of [...plans].reverse()) {
+      if (p.outcome !== "committed") continue;
+      const steps = await sink.stepsOf(p.id);
+      const planSteps = steps.map((s) => ({
+        axis: s.axis,
+        name: s.name,
+        ...s.params !== void 0 ? { params: s.params } : {},
+        ...s.address !== void 0 ? { address: s.address } : {}
+      }));
+      observations.push({ nl: p.nl, steps: planSteps, tainted: p.tainted, scanVerdict: p.scanVerdict });
+    }
+    return detectPromotion(observations, threshold);
+  }
+  async function saveMacro(input) {
+    const sink = deps.macros;
+    if (!sink) return null;
+    if (!promotable({ tainted: input.tainted, scanVerdict: input.scanVerdict })) return null;
+    return sink.save({ name: input.name, trigger: input.trigger, steps: input.steps });
+  }
+  async function runMacro(name, opts = {}) {
+    const sink = deps.macros;
+    if (!sink) return { stage: "not-found", ok: false, code: "MACRO_NOT_FOUND", message: "\uB9E4\uD06C\uB85C \uC601\uC18D\uC774 \uBE44\uD65C\uC131(app.data \uBBF8\uC81C\uACF5)" };
+    const macro = await sink.byName(name);
+    if (!macro) return { stage: "not-found", ok: false, code: "MACRO_NOT_FOUND", message: `\uB9E4\uD06C\uB85C \uC5C6\uC74C: ${name}` };
+    const map = await fetchDomainMap();
+    const v = validatePlan(macro.steps, planContextFromDomain(map));
+    if (!v.ok) {
+      return {
+        stage: "refused",
+        ok: false,
+        code: "MACRO_REFUSED",
+        message: `\uB9E4\uD06C\uB85C "${name}" \uC758 step #${v.index} \uC774(\uAC00) \uB354\uB294 \uC720\uD6A8\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: ${v.message}`,
+        macro,
+        refusal: { code: v.code, index: v.index }
+      };
+    }
+    const meta = { nl: macro.trigger, mode: "macro" };
+    const { result } = await dispatchTracedOpts(macro.steps, deps.trace ? meta : void 0, opts);
+    return {
+      stage: "dispatched",
+      macro,
+      commit: result,
+      ok: result.ok,
+      code: result.code,
+      results: result.results,
+      yielded: result.yielded,
+      rollback: result.rollback
+    };
+  }
+  async function listMacros() {
+    const sink = deps.macros;
+    if (!sink) return [];
+    return sink.list();
+  }
+  async function forgetMacro(name) {
+    const sink = deps.macros;
+    if (!sink) return false;
+    return sink.forget(name);
+  }
+  const api = {
+    runExample,
+    runCommand,
+    runDom,
+    runPlan,
+    planAndRun,
+    revalidateAndRun,
+    distributeAndRun,
+    reflectAndRun,
+    scan,
+    proposeMacro,
+    saveMacro,
+    runMacro,
+    listMacros,
+    forgetMacro
+  };
   Object.defineProperty(api, SEALED, { value: sealedDispatch, enumerable: false });
   return api;
 }
@@ -1538,6 +1748,18 @@ var CSS = `
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .tower-cmd-dg{flex:0 0 auto;color:var(--danger-soft,#d77);font-size:11px}
 .tower-empty{font-size:11.5px;color:var(--fg3,#888);padding:8px 9px}
+/* \uB9E4\uD06C\uB85C fast-path \uD589(M11) \u2014 \uC800\uC7A5\uB41C \uBA85\uBA85 callable. \uC608\uC2DC\uD589 \uB8E9 + \u2605 \uBA85\uBA85 \uD45C\uC2DD + \u2715 forget */
+.tower-macros{display:flex;flex-direction:column;gap:5px}
+.tower-macro{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;
+  border:1px solid var(--acc,#7aa2f7);background:var(--accbg,rgba(122,162,247,.10));cursor:pointer;
+  text-align:left;color:inherit;font:inherit}
+.tower-macro:hover{background:var(--accbg,rgba(122,162,247,.18))}
+.tower-macro-ic{flex:0 0 auto;color:var(--acc,#7aa2f7);font-size:12px}
+.tower-macro-tt{flex:1 1 auto;min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tower-macro-go{flex:0 0 auto;font-size:11px;color:var(--fg3,#888)}
+.tower-macro-x{flex:0 0 auto;appearance:none;border:0;background:transparent;color:var(--fg3,#888);
+  font:inherit;font-size:12px;cursor:pointer;border-radius:5px;padding:1px 5px;line-height:1}
+.tower-macro-x:hover{color:var(--danger-soft,#e66);background:var(--danger-bg,rgba(220,90,90,.14))}
 /* \uB77C\uC774\uBE0C\uCE78 \u2014 Clubhouse st-bubble \uB8E9 \uC7AC\uC0AC\uC6A9 */
 .tower-live-hd{padding:9px 11px;border-bottom:1px solid var(--bd,#3a3a3a);font-size:10.5px;font-weight:700;
   letter-spacing:.04em;text-transform:uppercase;color:var(--fg3,#888);flex:0 0 auto}
@@ -1668,6 +1890,9 @@ function createTowerModal(deps) {
   let undrag = null;
   let subs = [];
   let palWrap = null;
+  let macroWrap = null;
+  let macroSec = null;
+  let macroCache = [];
   let liveBox = null;
   let nlInput = null;
   let planBox = null;
@@ -1731,7 +1956,7 @@ function createTowerModal(deps) {
     window.addEventListener("keydown", onKey, true);
     ok.focus();
   });
-  const executor = createExecutor({ app, confirmGate, lang, planner: deps.planner, trace: deps.trace });
+  const executor = createExecutor({ app, confirmGate, lang, planner: deps.planner, trace: deps.trace, macros: deps.macros });
   function reportOutcome(label, r) {
     let key = "towerRunOk";
     if (!r.ok) key = r.code === "NEEDS_TARGET" ? "towerRunNeedsTarget" : r.code === "CONFIRM_DENIED" ? "towerRunDenied" : "towerRunFailed";
@@ -1783,6 +2008,49 @@ function createTowerModal(deps) {
       wrap.appendChild(row);
     }
   }
+  async function fetchMacros() {
+    try {
+      macroCache = deps.macros ? await executor.listMacros() : [];
+    } catch {
+      macroCache = [];
+    }
+    renderMacros();
+  }
+  function renderMacros() {
+    const wrap = macroWrap;
+    const sec = macroSec;
+    if (!wrap || !sec) return;
+    const q = (nlInput?.value ?? "").trim().toLowerCase();
+    const rows = macroCache.filter((m) => !q || m.name.toLowerCase().includes(q) || m.trigger.toLowerCase().includes(q));
+    wrap.replaceChildren();
+    const hidden = macroCache.length === 0;
+    sec.style.display = hidden ? "none" : "";
+    wrap.style.display = hidden ? "none" : "";
+    for (const m of rows) {
+      const row = el("button", "tower-macro");
+      row.type = "button";
+      row.dataset.node = `tower/macro/${m.name}`;
+      row.append(elText("span", "\u2605", "tower-macro-ic"));
+      const tt = elText("span", m.name, "tower-macro-tt");
+      tt.title = m.trigger;
+      row.append(tt);
+      row.append(elText("span", "\u23CE", "tower-macro-go"));
+      const del = el("button", "tower-macro-x");
+      del.type = "button";
+      del.textContent = "\u2715";
+      del.title = tr("towerMacroForget");
+      del.dataset.node = `tower/macro/${m.name}/forget`;
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void executor.forgetMacro(m.name).then(() => fetchMacros());
+      });
+      row.append(del);
+      row.addEventListener("click", () => {
+        void executor.runMacro(m.name).then((r) => reportOutcome(m.name, { ok: r.ok, code: r.code }));
+      });
+      wrap.appendChild(row);
+    }
+  }
   async function submitNL() {
     const raw = (nlInput?.value ?? "").trim();
     if (!raw || planning) return;
@@ -1801,6 +2069,18 @@ function createTowerModal(deps) {
       renderPalette();
       void executor.runCommand(cmd.name).then((r) => reportOutcome(cmd.name, r));
       return;
+    }
+    if (deps.macros) {
+      const macro = macroCache.find((m) => m.name === raw || m.trigger.trim() === raw);
+      if (macro) {
+        if (nlInput) nlInput.value = "";
+        clearPlanPreview();
+        renderPalette();
+        const r = await executor.runMacro(macro.name);
+        renderMacros();
+        reportOutcome(macro.name, { ok: r.ok, code: r.code });
+        return;
+      }
     }
     await runSlowPath(raw);
   }
@@ -2017,7 +2297,10 @@ function createTowerModal(deps) {
     input.className = "tower-in";
     input.placeholder = tr("towerInputPlaceholder");
     input.dataset.node = "tower/input";
-    input.addEventListener("input", () => renderPalette());
+    input.addEventListener("input", () => {
+      renderPalette();
+      renderMacros();
+    });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) {
         e.preventDefault();
@@ -2031,6 +2314,12 @@ function createTowerModal(deps) {
     plan.dataset.node = "tower/plan";
     planBox = plan;
     main.appendChild(plan);
+    const mSec = elText("div", tr("towerMacrosTitle"), "tower-sec");
+    macroSec = mSec;
+    main.appendChild(mSec);
+    const macros = el("div", "tower-macros");
+    macroWrap = macros;
+    main.appendChild(macros);
     main.appendChild(elText("div", tr("towerExamplesTitle"), "tower-sec"));
     const exs = el("div", "tower-exs");
     EXAMPLES.forEach((text, i) => {
@@ -2101,6 +2390,20 @@ function createTowerModal(deps) {
     },
     // incoming-plan 콘텐츠 스캐너 직통(M10) — executor.scan(모달 open 비의존, 실행 0).
     scan: (input) => executor.scan(input),
+    // ── M11: 매크로 승격 — executor 직통. save/forget 후 열려 있으면 매크로 행 재렌더(이벤트-우선 RULE 7) ──
+    proposeMacro: (threshold) => executor.proposeMacro(threshold),
+    saveMacro: async (input) => {
+      const m = await executor.saveMacro(input);
+      if (ov) await fetchMacros();
+      return m;
+    },
+    runMacro: (name, opts) => executor.runMacro(name, opts),
+    listMacros: () => executor.listMacros(),
+    forgetMacro: async (name) => {
+      const ok = await executor.forgetMacro(name);
+      if (ov) await fetchMacros();
+      return ok;
+    },
     open: () => {
       if (ov) return;
       ov = build();
@@ -2109,6 +2412,7 @@ function createTowerModal(deps) {
       subs.push(app.events.on("theme.changed", () => fetchCatalog()));
       subs.push(app.events.on("locale.changed", () => fetchCatalog()));
       void fetchCatalog();
+      void fetchMacros();
       emit();
     },
     close: () => {
@@ -2126,10 +2430,11 @@ function createTowerModal(deps) {
       confirmOv = null;
       ov.remove();
       ov = null;
-      palWrap = liveBox = planBox = null;
+      palWrap = liveBox = planBox = macroWrap = macroSec = null;
       nlInput = null;
       planning = false;
       catalog = [];
+      macroCache = [];
       liveActive = null;
       emit();
     },
@@ -2149,9 +2454,10 @@ function createTowerModal(deps) {
       confirmOv = null;
       ov?.remove();
       ov = null;
-      palWrap = liveBox = planBox = null;
+      palWrap = liveBox = planBox = macroWrap = macroSec = null;
       nlInput = null;
       planning = false;
+      macroCache = [];
     }
   };
   return api;
@@ -2159,8 +2465,8 @@ function createTowerModal(deps) {
 
 // src/tower/header.ts
 var SPARKLE_ICON = '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .962 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .962L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.962 0z" />';
-function setupTower(app, label, lang, planner, trace) {
-  const modal = createTowerModal({ title: label, lang, app, planner, trace, onChange: () => render() });
+function setupTower(app, label, lang, planner, trace, macros) {
+  const modal = createTowerModal({ title: label, lang, app, planner, trace, macros, onChange: () => render() });
   let unregister = null;
   const render = () => {
     unregister = app.ui.registerHeaderAction({
@@ -2182,6 +2488,11 @@ function setupTower(app, label, lang, planner, trace) {
     reflectAndRun: (nl, opts) => modal.reflectAndRun(nl, opts),
     previewInject: (nl, steps) => modal.previewInject(nl, steps),
     scan: (input) => modal.scan(input),
+    proposeMacro: (threshold) => modal.proposeMacro(threshold),
+    saveMacro: (input) => modal.saveMacro(input),
+    runMacro: (name, opts) => modal.runMacro(name, opts),
+    listMacros: () => modal.listMacros(),
+    forgetMacro: (name) => modal.forgetMacro(name),
     dispose: () => {
       unregister?.();
       modal.dispose();
@@ -2459,7 +2770,8 @@ ${priorContext}` : systemPrompt;
     };
     const traceSessionId = () => app.project?.current?.()?.root || "default";
     const trace = app.data ? createTrace(app.data, { sessionId: traceSessionId() }) : void 0;
-    const tower = setupTower(app, t("towerTitle", lang), () => lang, towerPlanner, trace);
+    const macros = app.data ? createMacroStore(app.data, { sessionId: traceSessionId() }) : void 0;
+    const tower = setupTower(app, t("towerTitle", lang), () => lang, towerPlanner, trace, macros);
     ctx.subscriptions.push({ dispose: () => tower.dispose() });
     const distOptions = () => {
       const st = activeClubhouse;
@@ -2699,6 +3011,65 @@ ${priorContext}` : systemPrompt;
           const steps = Array.isArray(p?.steps) ? p.steps : void 0;
           const report = await tower.scan({ untrusted, steps });
           return { ok: true, verdict: report.verdict, flags: report.flags, bySource: report.bySource };
+        }
+      })
+    );
+    ctx.subscriptions.push(
+      app.commands.register("tower.macro", {
+        description: 'Named macro promotion (M11): save a recurring tower plan as a named fast-path, then re-run it directly with zero planner calls. Verbs (verb param): "save" persists {name, trigger, steps[]} (a tainted/scanner-flagged plan from M10 is REFUSED \u2014 promotion never mints a silent fast-path for untrusted-derived steps); "run" re-validates the saved steps against the LIVE domain map (a step whose command/address no longer exists \u2192 MACRO_REFUSED, nothing dispatched \u2014 never stale-executed) then dispatches through the SAME danger gate (a destructive step STILL prompts the desktop confirm); "list" enumerates saved macros; "forget" deletes one by name; "propose" reports whether a trusted+clean plan has recurred >= threshold times in the session trace (a proposal only \u2014 it never auto-saves; human approval saves via verb:save). Macros persist via the host generic data store (app.data) and survive reload. A macro is a named fast-path entry inside the tower, not a freshly-minted core registry command name.',
+        triggers: { ko: "\uD0C0\uC6CC \uB9E4\uD06C\uB85C \uC800\uC7A5 \uC2E4\uD589 \uBAA9\uB85D \uC0AD\uC81C \uC2B9\uACA9 \uBA85\uBA85 fast-path \uD559\uC2B5 \uCEE8\uD2B8\uB864\uD0C0\uC6CC" },
+        params: {
+          verb: { type: "string", required: true, description: "save | run | list | forget | propose." },
+          name: { type: "string", description: "Macro name (user-coined). Required for save/run/forget." },
+          trigger: { type: "string", description: "Original natural-language trigger to store (save). Defaults to name when omitted." },
+          steps: {
+            type: "array",
+            description: "Validated plan steps (each {axis, name, params|address}) to store as the macro body (save). Typically the steps from a tower.plan dry-run that the user approved."
+          },
+          tainted: { type: "boolean", description: "M10 \u2014 pass true if the steps derived from untrusted content; save REFUSES it (promotable seal \u2014 no silent untrusted fast-path)." },
+          scanVerdict: { type: "string", description: 'M10 \u2014 "clean"|"flagged"; a "flagged" plan is REFUSED on save.' },
+          threshold: { type: "number", description: "Repeat-count threshold for propose (default 3). A trusted+clean plan signature recurring >= threshold times in the trace is proposed for promotion." },
+          autoConfirm: { type: "string", description: 'run only, headless: "deny" auto-denies the desktop confirm for a destructive step (deterministic \u2014 proves the gate fires without a human click). No auto-accept (forbidden).' }
+        },
+        handler: async (p) => {
+          const verb = String(p?.verb ?? "").trim();
+          if (!verb) return { ok: false, error: "verb \uD544\uC218(save|run|list|forget|propose)" };
+          if (verb === "list") {
+            const macros2 = await tower.listMacros();
+            return { ok: true, macros: macros2 };
+          }
+          if (verb === "propose") {
+            const threshold = Number.isFinite(p?.threshold) ? Math.max(2, Number(p.threshold)) : void 0;
+            const prop = await tower.proposeMacro(threshold);
+            return { ok: true, ...prop };
+          }
+          if (verb === "save") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "save \uC5D4 name \uD544\uC218" };
+            const steps = Array.isArray(p?.steps) ? p.steps : void 0;
+            if (!steps || !steps.length) return { ok: false, error: "save \uC5D4 steps(\uBE44\uC5B4 \uC788\uC9C0 \uC54A\uC740 \uBC30\uC5F4) \uD544\uC218" };
+            const trigger = typeof p?.trigger === "string" && p.trigger ? p.trigger : name;
+            const scanVerdict = p?.scanVerdict === "flagged" || p?.scanVerdict === "clean" ? p.scanVerdict : void 0;
+            const saved = await tower.saveMacro({ name, trigger, steps, tainted: p?.tainted === true, scanVerdict });
+            if (!saved) return { ok: false, code: "MACRO_NOT_SAVED", message: "\uB9E4\uD06C\uB85C \uC800\uC7A5 \uAC70\uBD80(untrusted \uC720\uB798\uC774\uAC70\uB098 \uC601\uC18D \uBE44\uD65C\uC131)" };
+            return { ok: true, saved };
+          }
+          if (verb === "run") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "run \uC5D4 name \uD544\uC218" };
+            const autoDeny = p?.autoConfirm === "deny";
+            const r = await tower.runMacro(name, { autoDenyConfirm: autoDeny });
+            if (r.stage === "not-found") return { ok: false, stage: r.stage, code: r.code, message: r.message };
+            if (r.stage === "refused") return { ok: false, stage: r.stage, code: r.code, message: r.message, refusal: r.refusal, macro: r.macro };
+            return { ok: r.ok, stage: r.stage, code: r.code, macro: r.macro, results: r.results, yielded: r.yielded, rollback: r.rollback };
+          }
+          if (verb === "forget") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "forget \uC5D4 name \uD544\uC218" };
+            const forgot = await tower.forgetMacro(name);
+            return { ok: true, forgot, name };
+          }
+          return { ok: false, error: `\uC54C \uC218 \uC5C6\uB294 verb: ${verb}(save|run|list|forget|propose)` };
         }
       })
     );

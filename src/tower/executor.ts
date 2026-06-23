@@ -28,6 +28,14 @@ import { distributePlans, type DistMode, type PlanFor, type AgentPlan } from "./
 import { deriveStatus, type TraceSink, type PlanMeta, type PlanTrace, type PlanOutcome, type RollbackRecord } from "./trace";
 import { planRollback, type RollbackSnapshot } from "./rollback";
 import { scanIncoming, type ScanReport, type ScanContext } from "./scanner";
+import {
+  detectPromotion,
+  promotable,
+  type Macro,
+  type MacroSink,
+  type PlanObservation,
+  type PromotionProposal,
+} from "./macro";
 
 // ── M10: untrusted-context taint 추적 + scanner 되먹임 ──
 //
@@ -272,7 +280,26 @@ export interface ExecutorDeps {
   // trace sink(M7) — 코어 generic app.data 위 세션/trace 영속(plan·step·outcome). 미주입이면 영속 0
   //   (순수 단위 테스트는 trace 없이 동작). 라이브에선 main.ts 가 createTrace(app.data, …) 로 주입.
   trace?: TraceSink;
+  // 매크로 sink(M11) — 코어 generic app.data 위 명명 매크로 영속(save/run/list/forget). 미주입이면
+  //   매크로 비활성(NO_MACRO_STORE). 라이브에선 main.ts 가 createMacroStore(app.data, …) 로 주입.
+  macros?: MacroSink;
 }
+
+// ── M11: 매크로 승격 결과 타입 ──
+
+// 승격 제안 결과(proposeMacro) — 반복 탐지 + RULE 0 봉인. proposed=true 면 사람에게 띄울 trigger/steps/count.
+//   절대 자동저장 0 — saveMacro 를 호출해야 비로소 영속(human-approval, design-constitution graduation 동형).
+export type MacroProposal = PromotionProposal;
+
+// 저장된 매크로 실행 결과(runMacro). stage 로 깔끔히 판별(discriminated union):
+//   "not-found" = 그 이름의 매크로 없음. "refused" = 재검증 실패(저장된 step 의 command/주소가 라이브 도메인에서
+//   사라짐) — stale-execute 0, 명확한 사유. "dispatched" = 0 planner 로 저장된 step 을 SAME dispatchPlan/gate 로
+//   디스패치한 결과(danger step 은 confirm 게이트 그대로 — commit.ok 가 false 면 confirm 거부·step 실패지
+//   refusal 이 아님). 호출자가 stage 로 정확히 분기한다(매크로 없음 ≠ 거부 ≠ 디스패치 실패).
+export type MacroRunResult =
+  | { stage: "not-found"; ok: false; code: "MACRO_NOT_FOUND"; message: string }
+  | { stage: "refused"; ok: false; code: "MACRO_REFUSED"; message: string; macro: Macro; refusal: { code: string; index: number } }
+  | { stage: "dispatched"; macro: Macro; commit: CommitResult; ok: boolean; code?: string; results?: StepResult[]; yielded?: boolean; rollback?: RollbackResult };
 
 // confirm 모달이 노출하는 data-node 경로(소스 단일 진실). 컨테이너만 노출(가시성), accept 는 비노출.
 //   executor.test.ts 가 이 집합으로 "accept 비노출" 계약을 단언한다.
@@ -376,6 +403,29 @@ export interface TowerExecutor {
   //   검사해 ScanReport(flags/bySource/verdict)를 돌려준다. 노출 command tower.scan 이 이걸로 자가검증(RULE 4).
   //   순수 판정만 — 어떤 step 도 실행하지 않는다(데이터 취급의 관찰 표면).
   scan: (input: { untrusted?: UntrustedSource[]; steps?: PlanStep[] }) => Promise<ScanReport>;
+  // ── M11: 매크로 승격(반복 NL→plan 을 명명 fast-path 로) ──
+  // 반복 탐지(M7 trace history 기준) → 승격 제안. 같은 TRUSTED plan 시그니처가 ≥ threshold 회 재발하면 제안.
+  //   tainted/flagged(M10) plan 은 절대 제안 0(RULE 0 — 무음 untrusted fast-path 금지). 제안 ≠ 저장 —
+  //   사람이 승인(saveMacro)해야 영속. trace 미주입이면 항상 proposed:false(history 없음).
+  proposeMacro: (threshold?: number) => Promise<MacroProposal>;
+  // 명명 매크로 저장(human-approval 후) — trigger(NL)+steps 를 app.data 에 영속. 같은 이름은 덮어쓰기.
+  //   macros sink 미주입이면 NULL 반환(영속 비활성). RULE 0 — tainted/flagged(M10) 입력은 저장 0(promotable
+  //   봉인). 저장만 — 실행은 runMacro.
+  saveMacro: (input: {
+    name: string;
+    trigger: string;
+    steps: PlanStep[];
+    tainted?: boolean;
+    scanVerdict?: "clean" | "flagged";
+  }) => Promise<Macro | null>;
+  // 저장된 매크로 fast-path 실행 — 0 planner. BEFORE dispatch, 저장된 step 을 라이브 도메인맵으로 재검증
+  //   (validatePlan) — command/주소가 사라졌으면 REFUSED(stale-execute 0). destructive step 은 SAME
+  //   dispatchPlan/gate 경유(매크로 승격이 danger 를 우회하지 않음 — RULE 0). trace(M7) 로 기록(평범한 plan 처럼).
+  runMacro: (name: string, opts?: CommitOptions) => Promise<MacroRunResult>;
+  // 저장된 매크로 목록(createdAt 오름차순). 팔레트·tower.macro list 가 쓴다.
+  listMacros: () => Promise<Macro[]>;
+  // 이름으로 매크로 삭제. 삭제했으면 true, 없던 이름이면 false(정직). 삭제 후엔 더는 fast-path 안 됨.
+  forgetMacro: (name: string) => Promise<boolean>;
 }
 
 // 게이트의 유일 실행 통로(sealedDispatch) 접근 심볼 — 테스트가 "토큰만으로는 못 뚫는다"를 실증하려면
@@ -916,6 +966,23 @@ export function createExecutor(deps: ExecutorDeps): TowerExecutor {
     return { result, finish: (outcome) => tr.finish(outcome) };
   }
 
+  // 매크로(M11) 전용 — 저장된 step 을 commit 옵션(shouldYield/autoDenyConfirm)을 그대로 전달하며 디스패치하고
+  //   outcome 까지 종결한다. dispatchTraced 는 finish 를 호출자에게 미루지만(M8 verify 가 뒤에 오므로), 매크로는
+  //   verify 단계가 없어 디스패치 결과로 곧장 outcome 을 분류한다(yielded > failed > committed). trace 미주입이면
+  //   그냥 dispatch. tainted 봉인은 매크로엔 0(매크로는 trusted+clean 만 승격되므로 — runMacro 가 보장).
+  async function dispatchTracedOpts(
+    steps: PlanStep[],
+    meta: PlanMeta | undefined,
+    copts: CommitOptions,
+  ): Promise<{ result: CommitResult }> {
+    const sink = deps.trace;
+    if (!sink || !meta) return { result: await dispatchPlan(steps, copts) };
+    const tr = await sink.begin(meta);
+    const result = await dispatchPlan(steps, copts, tr);
+    await tr.finish(result.yielded ? "yielded" : result.ok ? "committed" : "failed");
+    return { result };
+  }
+
   // post-execution reflection 루프(M8). planAndRun 의 PRE-execution(dry-run)과 달리 즉시 디스패치하는 자율
   //   루프지만, 매 step 은 동일 danger 게이트(confirmGate)를 강제 경유한다(재계획도 우회 0). 흐름:
   //   계획(planner+buildPlanSystemPrompt, correction 되먹임) → maxSteps 가드(초과 거부) → validatePlan →
@@ -1054,7 +1121,118 @@ export function createExecutor(deps: ExecutorDeps): TowerExecutor {
     return scanIncoming({ untrusted: input.untrusted, steps: input.steps }, scanCtx(map));
   }
 
-  const api: TowerExecutor = { runExample, runCommand, runDom, runPlan, planAndRun, revalidateAndRun, distributeAndRun, reflectAndRun, scan };
+  // ── M11: 매크로 승격 ──
+  //
+  // 반복 탐지 → 승격 제안(proposeMacro). M7 trace history(현재 세션 plan 들 + 각 plan 의 step)를 관측으로
+  //   끌어와 detectPromotion(순수)에 넣는다. 같은 TRUSTED plan 시그니처가 ≥ threshold 회 재발하면 제안.
+  //   ⚠️ RULE 0(no-bypass): tainted/flagged(M10) plan 은 관측에서 promotable() 이 false 라 카운트 0 —
+  //   절대 threshold 에 못 닿는다(무음 untrusted fast-path 금지). committed plan 만 관측으로 본다(실제로
+  //   실행돼 사람이 의도한 plan — dry-run-discarded/failed/escalated 는 반복 패턴 근거가 아님).
+  async function proposeMacro(threshold = 3): Promise<MacroProposal> {
+    const sink = deps.trace;
+    if (!sink) return { proposed: false }; // history 없음(영속 비활성).
+    const plans = await sink.recentPlans({ limit: 200 });
+    const observations: PlanObservation[] = [];
+    // 오래된 것부터(재발 순서 보존) — recentPlans 는 createdAt 내림차순이라 역순으로 관측을 쌓는다.
+    for (const p of [...plans].reverse()) {
+      if (p.outcome !== "committed") continue; // 실제 실행돼 의도가 확인된 plan 만.
+      const steps = await sink.stepsOf(p.id);
+      // trace step 레코드 → PlanStep(axis/name/params/address). 시그니처는 이 ordered steps 로 만든다.
+      const planSteps: PlanStep[] = steps.map((s) => ({
+        axis: s.axis,
+        name: s.name,
+        ...(s.params !== undefined ? { params: s.params } : {}),
+        ...(s.address !== undefined ? { address: s.address } : {}),
+      }));
+      observations.push({ nl: p.nl, steps: planSteps, tainted: p.tainted, scanVerdict: p.scanVerdict });
+    }
+    return detectPromotion(observations, threshold);
+  }
+
+  // 명명 매크로 저장(human-approval 후) — RULE 0 가드: tainted/flagged plan 은 절대 저장 0. 호출자가
+  //   승격 제안을 사람에게 띄우고 승인 시에만 부른다(제안 ≠ 저장). macros sink 미주입이면 null.
+  async function saveMacro(input: {
+    name: string;
+    trigger: string;
+    steps: PlanStep[];
+    tainted?: boolean;
+    scanVerdict?: "clean" | "flagged";
+  }): Promise<Macro | null> {
+    const sink = deps.macros;
+    if (!sink) return null;
+    // RULE 0 — 저장 입력에도 promotable 봉인(제안 단계를 우회한 직접 저장도 막는다). tainted/flagged → 저장 0.
+    if (!promotable({ tainted: input.tainted, scanVerdict: input.scanVerdict })) return null;
+    return sink.save({ name: input.name, trigger: input.trigger, steps: input.steps });
+  }
+
+  // 저장된 매크로 fast-path 실행 — 0 planner. ① byName 조회(없으면 NOT_FOUND). ② BEFORE dispatch:
+  //   라이브 도메인맵으로 저장된 step 을 validatePlan 재검증 — command/주소가 사라졌으면 REFUSED(stale 0).
+  //   ③ SAME dispatchPlan/gate 로 디스패치(매크로라고 danger 우회 0 — destructive 는 confirm 게이트 그대로).
+  //   ④ trace(M7) 로 기록(mode="macro"). planner 는 절대 호출하지 않는다(fast-path SOURCE — 두 번째 실행 경로
+  //   아님, RULE 6).
+  async function runMacro(name: string, opts: CommitOptions = {}): Promise<MacroRunResult> {
+    const sink = deps.macros;
+    if (!sink) return { stage: "not-found", ok: false, code: "MACRO_NOT_FOUND", message: "매크로 영속이 비활성(app.data 미제공)" };
+    const macro = await sink.byName(name);
+    if (!macro) return { stage: "not-found", ok: false, code: "MACRO_NOT_FOUND", message: `매크로 없음: ${name}` };
+    // ② 재검증 — 저장 당시 유효했어도 지금 command/주소가 사라졌을 수 있다(플러그인 비활성·뷰 닫힘 등).
+    //   라이브 도메인맵 기준으로 다시 검증해 stale step 을 실행하지 않고 거부한다(refused-not-stale-executed).
+    const map = await fetchDomainMap();
+    const v = validatePlan(macro.steps, planContextFromDomain(map));
+    if (!v.ok) {
+      return {
+        stage: "refused",
+        ok: false,
+        code: "MACRO_REFUSED",
+        message: `매크로 "${name}" 의 step #${(v as any).index} 이(가) 더는 유효하지 않습니다: ${v.message}`,
+        macro,
+        refusal: { code: v.code, index: (v as any).index },
+      };
+    }
+    // ③ SAME dispatchPlan — danger step 은 confirm 게이트 그대로(매크로 승격이 danger 우회 0). shouldYield 등
+    //   commit 옵션은 그대로 전달. trace 엮음(M7, mode="macro"). planner 미호출(fast-path SOURCE, 0 planner).
+    const meta: PlanMeta = { nl: macro.trigger, mode: "macro" };
+    const { result } = await dispatchTracedOpts(macro.steps, deps.trace ? meta : undefined, opts);
+    return {
+      stage: "dispatched",
+      macro,
+      commit: result,
+      ok: result.ok,
+      code: result.code,
+      results: result.results,
+      yielded: result.yielded,
+      rollback: result.rollback,
+    };
+  }
+
+  async function listMacros(): Promise<Macro[]> {
+    const sink = deps.macros;
+    if (!sink) return [];
+    return sink.list();
+  }
+
+  async function forgetMacro(name: string): Promise<boolean> {
+    const sink = deps.macros;
+    if (!sink) return false;
+    return sink.forget(name);
+  }
+
+  const api: TowerExecutor = {
+    runExample,
+    runCommand,
+    runDom,
+    runPlan,
+    planAndRun,
+    revalidateAndRun,
+    distributeAndRun,
+    reflectAndRun,
+    scan,
+    proposeMacro,
+    saveMacro,
+    runMacro,
+    listMacros,
+    forgetMacro,
+  };
   // 적대 테스트 전용 봉인 통로 — gatedRun 분기를 우회해 토큰만으로 sealedDispatch 를 직접 호출(NOP 공격
   //   동형). 데이터 의존이라 위조/소비 토큰 → 게이트 엔트리 부재 → 0 실행을 단언한다(검증을 지워도 막힘).
   Object.defineProperty(api, SEALED, { value: sealedDispatch, enumerable: false });

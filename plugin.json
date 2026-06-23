@@ -149,6 +149,13 @@
           "en": "Tower Scan (untrusted-content injection scanner, headless)",
           "ko": "컨트롤 타워 스캔(비신뢰 콘텐츠 주입 시그니처 검사, M10)"
         }
+      },
+      {
+        "name": "tower.macro",
+        "title": {
+          "en": "Tower Macro (named fast-path: save/run/list/forget/propose)",
+          "ko": "컨트롤 타워 매크로(명명 fast-path: 저장·실행·목록·삭제·승격제안, M11)"
+        }
       }
     ],
     "nodes": [

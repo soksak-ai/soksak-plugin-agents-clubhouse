@@ -15,6 +15,7 @@ import { t, tp } from "./i18n";
 import { setupTower } from "./tower/header";
 import { TOWER_LIVE_TOPIC, type TowerLiveEvent } from "./tower/modal";
 import { createTrace, type DataApi, type TraceSink, type TracePlan, type TraceStep } from "./tower/trace";
+import { createMacroStore, type MacroSink, type Macro } from "./tower/macro";
 import { deleteStep, moveStep, editParams } from "./tower/editplan";
 import type { PlanStep } from "./tower/plan";
 import type { UntrustedSource } from "./tower/executor";
@@ -222,8 +223,13 @@ export default {
     const trace: TraceSink | undefined = app.data
       ? createTrace(app.data as DataApi, { sessionId: traceSessionId() })
       : undefined;
+    // 명명 매크로 영속(M11) — 같은 app.data 위, 같은 sessionId(프로젝트 루트)로 격리. trace 와 동일 인프라
+    //   (코어 커플링 0, raw SQL 0). data 권한 미부여 환경이면 undefined → 매크로 비활성(기능 무해).
+    const macros: MacroSink | undefined = app.data
+      ? createMacroStore(app.data as DataApi, { sessionId: traceSessionId() })
+      : undefined;
 
-    const tower = setupTower(app, t("towerTitle", lang), () => lang, towerPlanner, trace);
+    const tower = setupTower(app, t("towerTitle", lang), () => lang, towerPlanner, trace, macros);
     ctx.subscriptions.push({ dispose: () => tower.dispose() });
 
     // 활성 Clubhouse 상태 → 분배 옵션. 모드/참여자/진행자/이름을 라이브 상태에서 끌어온다(단일 진실).
@@ -527,6 +533,78 @@ export default {
           const steps = Array.isArray(p?.steps) ? (p.steps as PlanStep[]) : undefined;
           const report = await tower.scan({ untrusted, steps });
           return { ok: true, verdict: report.verdict, flags: report.flags, bySource: report.bySource };
+        },
+      }),
+    );
+
+    // ── tower.macro(매크로 승격 — 반복 NL→plan 을 명명 fast-path 로, M11) ──
+    // "학습 = 명명 callable". 단일 사전선언 command(verbs: save/run/list/forget + propose) — 코어 레지스트리에
+    //   매크로별 새 이름을 동적 등록할 수 없으므로(conformance: contributes.commands 가 모든 이름 사전선언 필수,
+    //   매크로 이름은 런타임 사용자-coined) 매크로는 app.data 에 영속되고 이 한 command + 모달 팔레트로 노출된다.
+    //   매크로는 타워 *안의* 명명 fast-path 엔트리지 새 코어 레지스트리 이름이 아니다(RULE 8 노출 + conformance 동시).
+    // ⚠️ 안전(RULE 0): run 은 저장된 step 을 라이브 도메인맵으로 재검증(사라진 command/주소 → MACRO_REFUSED,
+    //   stale-execute 0)하고 SAME dispatchPlan/gate 로 디스패치(destructive step 은 confirm 게이트 그대로 — 매크로
+    //   승격이 danger 우회 0). save 는 tainted/flagged(M10) 입력을 거부(promotable 봉인 — 무음 untrusted fast-path 0).
+    //   propose 는 trusted+clean 반복만 제안하지 절대 자동저장 0(human-approval).
+    ctx.subscriptions.push(
+      app.commands.register("tower.macro", {
+        description:
+          "Named macro promotion (M11): save a recurring tower plan as a named fast-path, then re-run it directly with zero planner calls. Verbs (verb param): \"save\" persists {name, trigger, steps[]} (a tainted/scanner-flagged plan from M10 is REFUSED — promotion never mints a silent fast-path for untrusted-derived steps); \"run\" re-validates the saved steps against the LIVE domain map (a step whose command/address no longer exists → MACRO_REFUSED, nothing dispatched — never stale-executed) then dispatches through the SAME danger gate (a destructive step STILL prompts the desktop confirm); \"list\" enumerates saved macros; \"forget\" deletes one by name; \"propose\" reports whether a trusted+clean plan has recurred >= threshold times in the session trace (a proposal only — it never auto-saves; human approval saves via verb:save). Macros persist via the host generic data store (app.data) and survive reload. A macro is a named fast-path entry inside the tower, not a freshly-minted core registry command name.",
+        triggers: { ko: "타워 매크로 저장 실행 목록 삭제 승격 명명 fast-path 학습 컨트롤타워" },
+        params: {
+          verb: { type: "string", required: true, description: "save | run | list | forget | propose." },
+          name: { type: "string", description: "Macro name (user-coined). Required for save/run/forget." },
+          trigger: { type: "string", description: "Original natural-language trigger to store (save). Defaults to name when omitted." },
+          steps: {
+            type: "array",
+            description: "Validated plan steps (each {axis, name, params|address}) to store as the macro body (save). Typically the steps from a tower.plan dry-run that the user approved.",
+          },
+          tainted: { type: "boolean", description: "M10 — pass true if the steps derived from untrusted content; save REFUSES it (promotable seal — no silent untrusted fast-path)." },
+          scanVerdict: { type: "string", description: "M10 — \"clean\"|\"flagged\"; a \"flagged\" plan is REFUSED on save." },
+          threshold: { type: "number", description: "Repeat-count threshold for propose (default 3). A trusted+clean plan signature recurring >= threshold times in the trace is proposed for promotion." },
+          autoConfirm: { type: "string", description: "run only, headless: \"deny\" auto-denies the desktop confirm for a destructive step (deterministic — proves the gate fires without a human click). No auto-accept (forbidden)." },
+        },
+        handler: async (p: any) => {
+          const verb = String(p?.verb ?? "").trim();
+          if (!verb) return { ok: false, error: "verb 필수(save|run|list|forget|propose)" };
+          if (verb === "list") {
+            const macros: Macro[] = await tower.listMacros();
+            return { ok: true, macros };
+          }
+          if (verb === "propose") {
+            const threshold = Number.isFinite(p?.threshold) ? Math.max(2, Number(p.threshold)) : undefined;
+            const prop = await tower.proposeMacro(threshold);
+            return { ok: true, ...prop };
+          }
+          if (verb === "save") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "save 엔 name 필수" };
+            const steps = Array.isArray(p?.steps) ? (p.steps as PlanStep[]) : undefined;
+            if (!steps || !steps.length) return { ok: false, error: "save 엔 steps(비어 있지 않은 배열) 필수" };
+            const trigger = typeof p?.trigger === "string" && p.trigger ? p.trigger : name;
+            const scanVerdict = p?.scanVerdict === "flagged" || p?.scanVerdict === "clean" ? p.scanVerdict : undefined;
+            const saved = await tower.saveMacro({ name, trigger, steps, tainted: p?.tainted === true, scanVerdict });
+            // null = RULE 0 봉인 거부(tainted/flagged) 또는 영속 비활성(app.data 미제공).
+            if (!saved) return { ok: false, code: "MACRO_NOT_SAVED", message: "매크로 저장 거부(untrusted 유래이거나 영속 비활성)" };
+            return { ok: true, saved };
+          }
+          if (verb === "run") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "run 엔 name 필수" };
+            const autoDeny = p?.autoConfirm === "deny";
+            const r = await tower.runMacro(name, { autoDenyConfirm: autoDeny });
+            // 투명 — stage(not-found/refused/dispatched)·결과를 그대로 노출(되먹임·감사).
+            if (r.stage === "not-found") return { ok: false, stage: r.stage, code: r.code, message: r.message };
+            if (r.stage === "refused") return { ok: false, stage: r.stage, code: r.code, message: r.message, refusal: r.refusal, macro: r.macro };
+            return { ok: r.ok, stage: r.stage, code: r.code, macro: r.macro, results: r.results, yielded: r.yielded, rollback: r.rollback };
+          }
+          if (verb === "forget") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "forget 엔 name 필수" };
+            const forgot = await tower.forgetMacro(name);
+            return { ok: true, forgot, name };
+          }
+          return { ok: false, error: `알 수 없는 verb: ${verb}(save|run|list|forget|propose)` };
         },
       }),
     );
