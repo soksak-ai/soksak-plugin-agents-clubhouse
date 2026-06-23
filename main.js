@@ -307,9 +307,11 @@ var nameOf = (id) => NAME[id] ?? id;
 var FACIL_MAX_ROUNDS = 6;
 var CSS = `
 .st{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
-.st-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto;flex-wrap:wrap}
-.st-bar b{font-weight:700;letter-spacing:.02em}
-.st-tabs{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.st-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid rgba(127,127,127,.2);flex:0 0 auto;flex-wrap:nowrap;min-width:0}
+.st-bar b{font-weight:700;letter-spacing:.02em;flex:0 0 auto;white-space:nowrap}
+.st-tabs{display:flex;align-items:center;gap:5px;flex-wrap:nowrap;flex:1 1 auto;min-width:0;overflow-x:auto;scrollbar-width:none}
+.st-tabs::-webkit-scrollbar{display:none}
+.st-tab{flex:0 0 auto}
 .st-tab{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:8px;border:1px solid rgba(127,127,127,.28);background:rgba(127,127,127,.08);cursor:grab;font-size:12px;user-select:none;touch-action:none;transition:opacity .12s,border-color .12s}
 .st-tab.off{opacity:.4}
 .st-tab.drag{cursor:grabbing;opacity:.95;border-color:currentColor;box-shadow:0 3px 10px rgba(0,0,0,.35);transform:scale(1.06);position:relative;z-index:3}
@@ -318,10 +320,10 @@ var CSS = `
 .st-crown{cursor:pointer;font-size:10px;opacity:.3;user-select:none;filter:grayscale(1)}
 .st-crown:hover{opacity:.7}
 .st-crown.on{opacity:1;filter:none}
-.st-kib{margin-left:4px;display:inline-flex;border-radius:8px;overflow:hidden;border:1px solid rgba(127,127,127,.28)}
+.st-kib{margin-left:4px;display:inline-flex;border-radius:8px;overflow:hidden;border:1px solid rgba(127,127,127,.28);flex:0 0 auto}
 .st-kib button{appearance:none;border:0;background:transparent;color:inherit;opacity:.6;font:inherit;font-size:11px;padding:3px 9px;cursor:pointer}
 .st-kib button.on{opacity:1;background:rgba(127,127,127,.2);font-weight:700}
-.st-status{margin-left:auto;font-size:11px;color:var(--fg3,#888)}
+.st-status{margin-left:auto;font-size:11px;color:var(--fg3,#888);flex:0 0 auto;white-space:nowrap}
 .st-msgs{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
 .st-row{display:flex;flex-direction:column;gap:3px;max-width:88%}
 .st-row.user{align-self:flex-end;align-items:flex-end}
