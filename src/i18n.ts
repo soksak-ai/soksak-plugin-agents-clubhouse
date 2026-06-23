@@ -3,8 +3,8 @@
 
 const strings = {
   placeholder: {
-    en: "Message… (Enter to send, Shift+Enter for newline, @ to mention a model) — interject anytime",
-    ko: "메시지… (Enter 전송, Shift+Enter 줄바꿈, @로 모델 지목) — 언제나 참견 가능",
+    en: "Message… (Enter to send, Shift+Enter for newline, @ to mention a model)",
+    ko: "메시지… (Enter 전송, Shift+Enter 줄바꿈, @로 모델 지목)",
   },
   sendBtn: {
     en: "Send",

@@ -49,8 +49,8 @@ function createEngine(app) {
 // src/i18n.ts
 var strings = {
   placeholder: {
-    en: "Message\u2026 (Enter to send, Shift+Enter for newline, @ to mention a model) \u2014 interject anytime",
-    ko: "\uBA54\uC2DC\uC9C0\u2026 (Enter \uC804\uC1A1, Shift+Enter \uC904\uBC14\uAFC8, @\uB85C \uBAA8\uB378 \uC9C0\uBAA9) \u2014 \uC5B8\uC81C\uB098 \uCC38\uACAC \uAC00\uB2A5"
+    en: "Message\u2026 (Enter to send, Shift+Enter for newline, @ to mention a model)",
+    ko: "\uBA54\uC2DC\uC9C0\u2026 (Enter \uC804\uC1A1, Shift+Enter \uC904\uBC14\uAFC8, @\uB85C \uBAA8\uB378 \uC9C0\uBAA9)"
   },
   sendBtn: {
     en: "Send",
