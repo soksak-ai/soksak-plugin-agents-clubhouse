@@ -1,6 +1,12 @@
-// 타워 모달 셸 + 본문(M3) — AI-명령 모달. 560px 드래그 오버레이 + 헤더(✦ AI 명령 · 부제 · 그립 · ✕) +
-//   본문(NL 입력바 · 예시행 5 · 명령 팔레트 · 검색 · 우측 라이브칸). 실행(executor)은 M4 — 여기는 UI+라이브
-//   데이터+필터만(파괴 동작 0). Enter/예시·팔레트 클릭은 NL 바를 채우는 stub.
+// 타워 모달 셸 + 본문(M3) + fast-path 실행 배선(M4) — AI-명령 모달. 560px 드래그 오버레이 +
+//   헤더(✦ AI 명령 · 부제 · 그립 · ✕) + 본문(NL 입력바 · 예시행 5 · 명령 팔레트 · 검색 · 우측 라이브칸).
+//   M4: 예시행/팔레트 클릭 = executor.runExample/runCommand 로 실행(NL 바 채우기 stub 제거). danger 는
+//   confirm 게이트 경유. 로직은 executor.ts 단일 실행점에만 — modal 은 클릭을 executor 로 넘기고 결과를
+//   라이브칸에 반영할 뿐(RULE 6, 로직 누수 0).
+//
+// ⚠️ danger-confirm 게이트(매트릭스 불변식 b): confirm 모달의 accept 버튼은 data-node 가 없다 →
+//   collectExposed 미수집 → ui.input.click 으로 자가승인 불가. 컨테이너/취소만 노출(사람·E2E 가시성).
+//   accept 는 사람 pointer click 만 받는다. executor 의 runDom 도 "tower/confirm" 주소를 영구 거부.
 //
 // 코어 변경 0. 호스트 테마 변수(--card/--bd/--acc/--accbg/--inset/--fg/--fg3)만 사용 → 5테마 per-theme 코드 0.
 // document.body 직속(뷰 컨테이너 밖)이라 코어 catalogDom.collectExposed 가 호스트 크롬으로 수집:
@@ -13,6 +19,12 @@
 //   정공법 — setInterval/poll 루프 금지. 라이브칸은 stable bus 토픽 구독(per-connId 추측·폴링 없음).
 
 import { t, type I18nKey } from "../i18n";
+import {
+  createExecutor,
+  CONFIRM_EXPOSED_NODES,
+  type ConfirmGate,
+  type TowerExecutor,
+} from "./executor";
 
 // 라이브칸이 구독하는 stable bus 토픽 — Clubhouse 런타임(main.ts)이 스트림 단일 진실에서 재방송한다.
 //   acp.update.<connId> 는 connId 별이라 모달이 직접 못 잡는다 → main.ts onStream 이 이 토픽으로 relay(이벤트-우선).
@@ -97,6 +109,23 @@ const CSS = `
 .tower-lbubble{padding:6px 9px;border-radius:9px;white-space:pre-wrap;word-break:break-word;line-height:1.42;
   font-size:12px;background:var(--inset,rgba(127,127,127,.14))}
 .tower-lrow.user .tower-lbubble{background:var(--accbg,rgba(122,162,247,.18))}
+/* danger-confirm 게이트 — 코어 ConfirmCloseModal 패턴 재사용. 모달 위 z-index 로 사람-only 확인. */
+.tower-cfm-ov{position:fixed;inset:0;z-index:9100;background:rgba(0,0,0,.42);
+  display:flex;align-items:center;justify-content:center;font:13px system-ui,-apple-system,sans-serif}
+.tower-cfm{width:360px;max-width:calc(100vw - 32px);background:var(--card,#262626);color:var(--fg,#e6e6e6);
+  border:1px solid var(--bd,#3a3a3a);border-radius:11px;box-shadow:0 18px 50px rgba(0,0,0,.5);
+  padding:16px 17px;display:flex;flex-direction:column;gap:11px}
+.tower-cfm-tt{font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:7px}
+.tower-cfm-dg{color:var(--danger-soft,#e08;);font-size:14px}
+.tower-cfm-msg{font-size:12px;color:var(--fg3,#aaa);line-height:1.5}
+.tower-cfm-cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+  background:var(--inset,rgba(127,127,127,.14));border-radius:6px;padding:6px 8px;word-break:break-all}
+.tower-cfm-act{display:flex;justify-content:flex-end;gap:8px;margin-top:3px}
+.tower-cfm-btn{appearance:none;border:1px solid var(--bd,#3a3a3a);background:transparent;color:inherit;
+  font:inherit;cursor:pointer;border-radius:7px;padding:6px 13px}
+.tower-cfm-btn:hover{background:var(--inset,rgba(127,127,127,.14))}
+.tower-cfm-btn.danger{border-color:var(--danger-soft,#d77);color:var(--danger-soft,#e66);font-weight:600}
+.tower-cfm-btn.danger:hover{background:var(--danger-bg,rgba(220,90,90,.16))}
 `;
 
 // 명령 prefix → 글리프(축2 dom 아님, 시각 보조만). 미스 시 점 글리프.
@@ -247,6 +276,79 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
 
   const tr = (key: I18nKey) => t(key, lang());
 
+  // ── danger-confirm 게이트(DOM) — accept 는 data-node 없음(executor 도달 밖). 사람 pointer click 만
+  //   토큰 발급(issue). overlay/취소/Escape = 거부(null). 한 번에 하나(중첩 confirm 직렬). ──
+  let confirmOv: HTMLElement | null = null;
+  const confirmGate: ConfirmGate = (issue, info) =>
+    new Promise<string | null>((resolve) => {
+      // 이미 confirm 진행 중이면 새 요청은 거부(직렬 — danger 큐는 M6, 여기선 중복 방지).
+      if (confirmOv) return resolve(null);
+      let done = false;
+      const finish = (token: string | null) => {
+        if (done) return;
+        done = true;
+        window.removeEventListener("keydown", onKey, true);
+        confirmOv?.remove();
+        confirmOv = null;
+        resolve(token);
+      };
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          finish(null);
+        }
+      };
+
+      const ov = el("div", "tower-cfm-ov");
+      ov.dataset.node = CONFIRM_EXPOSED_NODES[0]; // "tower/confirm" — 컨테이너만 노출(가시성). accept 비노출.
+      ov.addEventListener("pointerdown", (e) => {
+        if (e.target === ov) finish(null); // overlay 클릭 = 취소.
+      });
+      const card = el("div", "tower-cfm");
+      card.addEventListener("pointerdown", (e) => e.stopPropagation());
+
+      const tt = el("div", "tower-cfm-tt");
+      tt.append(elText("span", "⚠", "tower-cfm-dg"), elText("span", tr("towerConfirmTitle"), ""));
+      const msg = elText(
+        "div",
+        tr(info.danger === "destructive" ? "towerConfirmDestructive" : "towerConfirmInject"),
+        "tower-cfm-msg",
+      );
+      const cmd = elText("div", info.command, "tower-cfm-cmd");
+
+      const act = el("div", "tower-cfm-act");
+      const cancel = el("button", "tower-cfm-btn");
+      (cancel as HTMLButtonElement).type = "button";
+      cancel.textContent = tr("towerConfirmCancel");
+      cancel.dataset.node = CONFIRM_EXPOSED_NODES[1]; // "tower/confirm/cancel" — 취소 노출 OK(자가-취소 안전).
+      cancel.addEventListener("click", () => finish(null));
+      const ok = el("button", "tower-cfm-btn danger");
+      (ok as HTMLButtonElement).type = "button";
+      ok.textContent = tr("towerConfirmRun");
+      // ⚠️ accept = data-node 없음 → ui.tree/ui.input.click 도달 밖. 사람 pointer click 만 토큰 발급.
+      ok.addEventListener("click", () => finish(issue()));
+      act.append(cancel, ok);
+
+      card.append(tt, msg, cmd, act);
+      ov.append(card);
+      document.body.appendChild(ov);
+      confirmOv = ov;
+      window.addEventListener("keydown", onKey, true);
+      ok.focus();
+    });
+
+  // executor = 유일 실행점. 모달은 클릭을 여기로 넘기고 결과만 라이브칸에 반영(로직 누수 0, RULE 6).
+  const executor: TowerExecutor = createExecutor({ app, confirmGate, lang });
+
+  // 실행 결과를 라이브칸 시스템 버블로 — 폴링 0, 사람 가시 피드백.
+  function reportOutcome(label: string, r: { ok: boolean; code?: string }): void {
+    let key: I18nKey = "towerRunOk";
+    if (!r.ok) key = r.code === "NEEDS_TARGET" ? "towerRunNeedsTarget" : r.code === "CONFIRM_DENIED" ? "towerRunDenied" : "towerRunFailed";
+    onLive({ kind: "user", who: "✦", text: label });
+    onLive({ kind: "start", who: "✦" });
+    onLive({ kind: "end", text: tr(key) });
+  }
+
   const emit = () => {
     try {
       onChange?.();
@@ -291,19 +393,13 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       row.append(tt);
       if (cmdDanger(c.name)) row.append(elText("span", "⚠", "tower-cmd-dg"));
       row.append(elText("span", c.name, "tower-cmd-sc")); // 단축키 필드 부재 → command 이름을 mono 로(축1 진실)
-      // 클릭 = NL 바를 이 command 이름으로 채움(실행 X, M4 executor). 파괴 동작 0.
-      row.addEventListener("click", () => fillInput(c.name));
+      // 클릭 = executor.runCommand(이 command 자체). danger 면 confirm 게이트 경유(executor 가 판정·게이트).
+      //   파라미터 없는 fast-path — 필수 파라미터 command 는 코어가 INVALID_PARAMS 로 거부(그 거부가 진실).
+      row.addEventListener("click", () => {
+        void executor.runCommand(c.name).then((r) => reportOutcome(c.name, r));
+      });
       wrap.appendChild(row);
     }
-  }
-
-  // 예시/팔레트 클릭·향후 ⏎ → NL 바 채움. M4 전엔 채우기만(실행·제출 없음).
-  function fillInput(text: string): void {
-    if (!nlInput) return;
-    nlInput.value = text;
-    nlInput.focus();
-    nlInput.setSelectionRange(text.length, text.length);
-    renderPalette(); // 입력 변경 = 검색 필터 갱신
   }
 
   // ── 라이브칸(이벤트-우선) — main.ts 가 TOWER_LIVE_TOPIC 으로 재방송한 스트림을 버블로 ──
@@ -381,7 +477,10 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       ex.append(elText("span", "✦", "tower-ex-mk"));
       ex.append(elText("span", `"${text}"`, "tower-ex-tx"));
       ex.append(elText("span", "⏎", "tower-ex-go"));
-      ex.addEventListener("click", () => fillInput(text));
+      // 클릭 = executor.runExample(i) — text → 실 command + 라이브 파라미터 해소 → 실행. danger 면 게이트.
+      ex.addEventListener("click", () => {
+        void executor.runExample(i).then((r) => reportOutcome(`"${text}"`, r));
+      });
       exs.appendChild(ex);
     });
     main.appendChild(exs);
@@ -458,6 +557,8 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       subs = [];
       undrag?.();
       undrag = null;
+      confirmOv?.remove(); // 진행 중 confirm 도 함께 정리(고아 게이트 0).
+      confirmOv = null;
       ov.remove();
       ov = null;
       palWrap = liveBox = null;
@@ -479,6 +580,8 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       subs = [];
       undrag?.();
       undrag = null;
+      confirmOv?.remove();
+      confirmOv = null;
       ov?.remove();
       ov = null;
       palWrap = liveBox = null;

@@ -167,6 +167,42 @@ var strings = {
   towerLiveEmpty: {
     en: "Agent stream appears here once orchestration starts.",
     ko: "\uC624\uCF00\uC2A4\uD2B8\uB808\uC774\uC158\uC774 \uC2DC\uC791\uB418\uBA74 \uC5D0\uC774\uC804\uD2B8 \uC2A4\uD2B8\uB9BC\uC774 \uC5EC\uAE30 \uD750\uB985\uB2C8\uB2E4."
+  },
+  towerConfirmTitle: {
+    en: "Confirm dangerous command",
+    ko: "\uC704\uD5D8 \uBA85\uB839 \uD655\uC778"
+  },
+  towerConfirmDestructive: {
+    en: "This will close or remove something. Run it?",
+    ko: "\uC774 \uBA85\uB839\uC740 \uB2EB\uAC70\uB098 \uC81C\uAC70\uD569\uB2C8\uB2E4. \uC2E4\uD589\uD560\uAE4C\uC694?"
+  },
+  towerConfirmInject: {
+    en: "This will inject input or send data. Run it?",
+    ko: "\uC774 \uBA85\uB839\uC740 \uC785\uB825\uC744 \uC8FC\uC785\uD558\uAC70\uB098 \uB370\uC774\uD130\uB97C \uBCF4\uB0C5\uB2C8\uB2E4. \uC2E4\uD589\uD560\uAE4C\uC694?"
+  },
+  towerConfirmRun: {
+    en: "Run",
+    ko: "\uC2E4\uD589"
+  },
+  towerConfirmCancel: {
+    en: "Cancel",
+    ko: "\uCDE8\uC18C"
+  },
+  towerRunOk: {
+    en: "Done.",
+    ko: "\uC644\uB8CC."
+  },
+  towerRunNeedsTarget: {
+    en: "No matching target found.",
+    ko: "\uB300\uC0C1\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
+  },
+  towerRunDenied: {
+    en: "Cancelled.",
+    ko: "\uCDE8\uC18C\uB428."
+  },
+  towerRunFailed: {
+    en: "Command failed.",
+    ko: "\uBA85\uB839 \uC2E4\uD328."
   }
 };
 function t(key, lang) {
@@ -177,6 +213,248 @@ function tp(key, lang, vars) {
   let s = t(key, lang);
   for (const [k, v] of Object.entries(vars)) s = s.replace(`{${k}}`, v);
   return s;
+}
+
+// src/tower/plan.ts
+var DESTRUCTIVE = /* @__PURE__ */ new Set([
+  "content.close",
+  "data.import",
+  "data.restore",
+  "panel.close",
+  "plugin.consent.revoke",
+  "plugin.disable",
+  "plugin.install",
+  "plugin.remove",
+  "plugin.update",
+  "project.close",
+  "secret.delete",
+  "view.close",
+  "editor.close",
+  // view.close 위임(코어 desc "same as view.close") — 닫기이므로 게이트.
+  "window.close"
+  // 창 닫기 — 파괴.
+]);
+var INJECT = /* @__PURE__ */ new Set([
+  "clipboard.write",
+  "media.proxy.info",
+  "media.proxy.playlist",
+  "media.proxy.stream",
+  "net.http.request",
+  "net.udp.request",
+  "net.udp.send",
+  "plugin.dev.load",
+  "plugin.dev.new",
+  "plugin.enable",
+  "schedule.set",
+  "secret.set",
+  "secret.unlock",
+  "term.exec",
+  "term.send",
+  "ui.input.click",
+  "ui.input.dblclick",
+  "ui.input.drag",
+  "ui.input.fill"
+]);
+function classifyDanger(name) {
+  if (DESTRUCTIVE.has(name)) return "destructive";
+  if (INJECT.has(name)) return "inject";
+  return void 0;
+}
+var AXES = /* @__PURE__ */ new Set(["command", "dom", "status"]);
+function validatePlan(steps, ctx) {
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (!s || typeof s !== "object" || !AXES.has(s.axis)) {
+      return { ok: false, code: "INVALID_STEP", index: i, message: `\uC798\uBABB\uB41C step(axis): ${JSON.stringify(s)}` };
+    }
+    if (s.axis === "dom") {
+      if (typeof s.name !== "string" || !s.name) {
+        return { ok: false, code: "INVALID_STEP", index: i, message: "dom step \uC5D0 name \uB204\uB77D" };
+      }
+      if (!ctx.commandNames.has(s.name)) {
+        return { ok: false, code: "UNKNOWN_COMMAND", index: i, message: `\uBBF8\uB4F1\uB85D dom command: ${s.name}` };
+      }
+      if (typeof s.address !== "string" || !s.address) {
+        return { ok: false, code: "INVALID_STEP", index: i, message: "dom step \uC5D0 address \uB204\uB77D" };
+      }
+      if (!ctx.domAddresses.has(s.address)) {
+        return { ok: false, code: "NOT_EXPOSED", index: i, message: `\uB178\uCD9C\uB418\uC9C0 \uC54A\uC740 \uC8FC\uC18C: ${s.address}` };
+      }
+      continue;
+    }
+    if (typeof s.name !== "string" || !s.name) {
+      return { ok: false, code: "INVALID_STEP", index: i, message: `${s.axis} step \uC5D0 name \uB204\uB77D` };
+    }
+    if (!ctx.commandNames.has(s.name)) {
+      return { ok: false, code: "UNKNOWN_COMMAND", index: i, message: `\uBBF8\uB4F1\uB85D command: ${s.name}` };
+    }
+  }
+  return { ok: true };
+}
+var EXAMPLE_COMMANDS = [
+  {
+    // "에디터 패널 닫아줘" — 활성 패널의 에디터 뷰를 찾아 닫는다(destructive).
+    text: "\uC5D0\uB514\uD130 \uD328\uB110 \uB2EB\uC544\uC918",
+    command: "editor.close",
+    resolveParams: async (q) => {
+      const r = await q("panel.list");
+      const panels = Array.isArray(r?.panels) ? r.panels : [];
+      for (const p of panels) {
+        const v = (p.views ?? []).find((vw) => vw.kind === "editor");
+        if (v) return { view: v.id };
+      }
+      return null;
+    }
+  },
+  {
+    // "터미널 패널 닫아줘" — 터미널 뷰가 든 패널 그룹을 닫는다(destructive).
+    text: "\uD130\uBBF8\uB110 \uD328\uB110 \uB2EB\uC544\uC918",
+    command: "panel.close",
+    resolveParams: async (q) => {
+      const r = await q("panel.list");
+      const panels = Array.isArray(r?.panels) ? r.panels : [];
+      const term = panels.find(
+        (p) => (p.views ?? []).some((vw) => vw.plugin === "soksak-plugin-terminal")
+      );
+      if (term) return { group: term.id };
+      const active = panels.find((p) => p.active) ?? panels[0];
+      return active ? { group: active.id } : null;
+    }
+  },
+  {
+    // "분할 반반으로 맞춰줘" — 첫 split 을 균등 분배(비파괴).
+    text: "\uBD84\uD560 \uBC18\uBC18\uC73C\uB85C \uB9DE\uCDB0\uC918",
+    command: "panel.equalize",
+    resolveParams: async (q) => {
+      const r = await q("state.tree");
+      const sid = findFirstSplitId(r?.tree);
+      return sid ? { split: sid } : null;
+    }
+  },
+  {
+    // "다크 모드로 바꿔줘" — 현재 테마 유지, 모드만 dark(비파괴).
+    text: "\uB2E4\uD06C \uBAA8\uB4DC\uB85C \uBC14\uAFD4\uC918",
+    command: "theme.apply",
+    resolveParams: async (q) => {
+      const r = await q("theme.list");
+      const name = typeof r?.current === "string" ? r.current : r?.themes?.[0]?.name;
+      return name ? { name, mode: "dark" } : null;
+    }
+  },
+  {
+    // "다음 테마로 바꿔줘" — theme.list 순서상 다음 테마(비파괴).
+    text: "\uB2E4\uC74C \uD14C\uB9C8\uB85C \uBC14\uAFD4\uC918",
+    command: "theme.apply",
+    resolveParams: async (q) => {
+      const r = await q("theme.list");
+      const themes = Array.isArray(r?.themes) ? r.themes : [];
+      if (!themes.length) return null;
+      const cur = typeof r?.current === "string" ? r.current : themes[0].name;
+      const idx = themes.findIndex((tt) => tt.name === cur);
+      const next = themes[(idx + 1) % themes.length];
+      return next?.name ? { name: next.name } : null;
+    }
+  }
+];
+function findFirstSplitId(node) {
+  if (!node || typeof node !== "object") return void 0;
+  if (node.split && typeof node.split.id === "string") return node.split.id;
+  if (typeof node.id === "string" && Array.isArray(node.children)) return node.id;
+  for (const v of Object.values(node)) {
+    const found = findFirstSplitId(v);
+    if (found) return found;
+  }
+  return void 0;
+}
+
+// src/tower/executor.ts
+var CONFIRM_EXPOSED_NODES = ["tower/confirm", "tower/confirm/cancel"];
+function isForbiddenChrome(address) {
+  return /(^|\/)tower\/confirm(\/|$)/.test(address) || /(^|\/)modal\/confirm-close(\/|$)/.test(address);
+}
+function randomToken() {
+  try {
+    const g = globalThis;
+    if (g.crypto?.getRandomValues) {
+      const b = new Uint8Array(16);
+      g.crypto.getRandomValues(b);
+      return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {
+  }
+  return `t${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+}
+var SEALED = Symbol("tower.executor.sealed");
+function createExecutor(deps) {
+  const { app, confirmGate } = deps;
+  const exec = (name, params) => app.commands.execute(name, params ?? {});
+  const gates = /* @__PURE__ */ new Map();
+  async function sealedDispatch(token) {
+    const entry = gates.get(token);
+    if (!entry) {
+      return { ok: false, code: "GATE_REQUIRED", message: "\uD655\uC778 \uAC8C\uC774\uD2B8 \uD1A0\uD070\uC774 \uC5C6\uAC70\uB098 \uB9CC\uB8CC\uB428(\uC2E4\uD589 \uBD88\uAC00)" };
+    }
+    gates.delete(token);
+    return exec(entry.name, entry.params);
+  }
+  async function gatedRun(name, params, danger) {
+    const issue = () => {
+      const token2 = randomToken();
+      gates.set(token2, { name, params });
+      return token2;
+    };
+    const token = await confirmGate(issue, { command: name, danger, params });
+    if (token == null) {
+      return { ok: false, code: "CONFIRM_DENIED", message: "\uC0AC\uC6A9\uC790\uAC00 \uC704\uD5D8 \uBA85\uB839 \uD655\uC778\uC744 \uAC70\uBD80/\uCDE8\uC18C\uD568" };
+    }
+    return sealedDispatch(token);
+  }
+  async function runCommand(name, params = {}) {
+    const danger = classifyDanger(name);
+    if (danger) return gatedRun(name, params, danger);
+    return exec(name, params);
+  }
+  async function runDom(address) {
+    if (isForbiddenChrome(address)) {
+      return { ok: false, code: "FORBIDDEN_CHROME", message: `\uBCF4\uC548 chrome \uC740 \uD074\uB9AD \uB300\uC0C1\uC774 \uC544\uB2D8: ${address}` };
+    }
+    return exec("ui.input.click", { address });
+  }
+  async function runExample(index) {
+    const spec = EXAMPLE_COMMANDS[index];
+    if (!spec) return { ok: false, code: "UNKNOWN_EXAMPLE", message: `\uC608\uC2DC \uC778\uB371\uC2A4 \uBC94\uC704 \uBC16: ${index}` };
+    let params;
+    try {
+      params = await spec.resolveParams((n, p) => exec(n, p));
+    } catch (e) {
+      return { ok: false, code: "RESOLVE_FAILED", message: String(e?.message ?? e) };
+    }
+    if (params == null) {
+      return { ok: false, code: "NEEDS_TARGET", message: `\uB300\uC0C1\uC744 \uCC3E\uC9C0 \uBABB\uD568: "${spec.text}"` };
+    }
+    return runCommand(spec.command, params);
+  }
+  async function runPlan(steps) {
+    const [cat, tree] = await Promise.all([exec("state.commands"), exec("ui.tree")]);
+    const commandNames = new Set(
+      (Array.isArray(cat?.commands) ? cat.commands : []).map((c) => c.name)
+    );
+    const domAddresses = new Set(
+      (Array.isArray(tree?.nodes) ? tree.nodes : []).map((n) => n.address)
+    );
+    const v = validatePlan(steps, { commandNames, domAddresses });
+    if (!v.ok) return { ok: false, code: v.code, message: v.message, index: v.index };
+    for (const s of steps) {
+      let r;
+      if (s.axis === "dom") r = await runDom(s.address);
+      else r = await runCommand(s.name, s.params ?? {});
+      if (!r.ok) return r;
+    }
+    return { ok: true };
+  }
+  const api = { runExample, runCommand, runDom, runPlan };
+  Object.defineProperty(api, SEALED, { value: sealedDispatch, enumerable: false });
+  return api;
 }
 
 // src/tower/modal.ts
@@ -250,6 +528,23 @@ var CSS = `
 .tower-lbubble{padding:6px 9px;border-radius:9px;white-space:pre-wrap;word-break:break-word;line-height:1.42;
   font-size:12px;background:var(--inset,rgba(127,127,127,.14))}
 .tower-lrow.user .tower-lbubble{background:var(--accbg,rgba(122,162,247,.18))}
+/* danger-confirm \uAC8C\uC774\uD2B8 \u2014 \uCF54\uC5B4 ConfirmCloseModal \uD328\uD134 \uC7AC\uC0AC\uC6A9. \uBAA8\uB2EC \uC704 z-index \uB85C \uC0AC\uB78C-only \uD655\uC778. */
+.tower-cfm-ov{position:fixed;inset:0;z-index:9100;background:rgba(0,0,0,.42);
+  display:flex;align-items:center;justify-content:center;font:13px system-ui,-apple-system,sans-serif}
+.tower-cfm{width:360px;max-width:calc(100vw - 32px);background:var(--card,#262626);color:var(--fg,#e6e6e6);
+  border:1px solid var(--bd,#3a3a3a);border-radius:11px;box-shadow:0 18px 50px rgba(0,0,0,.5);
+  padding:16px 17px;display:flex;flex-direction:column;gap:11px}
+.tower-cfm-tt{font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:7px}
+.tower-cfm-dg{color:var(--danger-soft,#e08;);font-size:14px}
+.tower-cfm-msg{font-size:12px;color:var(--fg3,#aaa);line-height:1.5}
+.tower-cfm-cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+  background:var(--inset,rgba(127,127,127,.14));border-radius:6px;padding:6px 8px;word-break:break-all}
+.tower-cfm-act{display:flex;justify-content:flex-end;gap:8px;margin-top:3px}
+.tower-cfm-btn{appearance:none;border:1px solid var(--bd,#3a3a3a);background:transparent;color:inherit;
+  font:inherit;cursor:pointer;border-radius:7px;padding:6px 13px}
+.tower-cfm-btn:hover{background:var(--inset,rgba(127,127,127,.14))}
+.tower-cfm-btn.danger{border-color:var(--danger-soft,#d77);color:var(--danger-soft,#e66);font-weight:600}
+.tower-cfm-btn.danger:hover{background:var(--danger-bg,rgba(220,90,90,.16))}
 `;
 var ICON_BY_PREFIX = {
   terminal: ">_",
@@ -354,6 +649,65 @@ function createTowerModal(deps) {
   let catalog = [];
   let liveActive = null;
   const tr = (key) => t(key, lang());
+  let confirmOv = null;
+  const confirmGate = (issue, info) => new Promise((resolve) => {
+    if (confirmOv) return resolve(null);
+    let done = false;
+    const finish = (token) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("keydown", onKey, true);
+      confirmOv?.remove();
+      confirmOv = null;
+      resolve(token);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        finish(null);
+      }
+    };
+    const ov2 = el("div", "tower-cfm-ov");
+    ov2.dataset.node = CONFIRM_EXPOSED_NODES[0];
+    ov2.addEventListener("pointerdown", (e) => {
+      if (e.target === ov2) finish(null);
+    });
+    const card = el("div", "tower-cfm");
+    card.addEventListener("pointerdown", (e) => e.stopPropagation());
+    const tt = el("div", "tower-cfm-tt");
+    tt.append(elText("span", "\u26A0", "tower-cfm-dg"), elText("span", tr("towerConfirmTitle"), ""));
+    const msg = elText(
+      "div",
+      tr(info.danger === "destructive" ? "towerConfirmDestructive" : "towerConfirmInject"),
+      "tower-cfm-msg"
+    );
+    const cmd = elText("div", info.command, "tower-cfm-cmd");
+    const act = el("div", "tower-cfm-act");
+    const cancel = el("button", "tower-cfm-btn");
+    cancel.type = "button";
+    cancel.textContent = tr("towerConfirmCancel");
+    cancel.dataset.node = CONFIRM_EXPOSED_NODES[1];
+    cancel.addEventListener("click", () => finish(null));
+    const ok = el("button", "tower-cfm-btn danger");
+    ok.type = "button";
+    ok.textContent = tr("towerConfirmRun");
+    ok.addEventListener("click", () => finish(issue()));
+    act.append(cancel, ok);
+    card.append(tt, msg, cmd, act);
+    ov2.append(card);
+    document.body.appendChild(ov2);
+    confirmOv = ov2;
+    window.addEventListener("keydown", onKey, true);
+    ok.focus();
+  });
+  const executor = createExecutor({ app, confirmGate, lang });
+  function reportOutcome(label, r) {
+    let key = "towerRunOk";
+    if (!r.ok) key = r.code === "NEEDS_TARGET" ? "towerRunNeedsTarget" : r.code === "CONFIRM_DENIED" ? "towerRunDenied" : "towerRunFailed";
+    onLive({ kind: "user", who: "\u2726", text: label });
+    onLive({ kind: "start", who: "\u2726" });
+    onLive({ kind: "end", text: tr(key) });
+  }
   const emit = () => {
     try {
       onChange?.();
@@ -392,16 +746,11 @@ function createTowerModal(deps) {
       row.append(tt);
       if (cmdDanger(c.name)) row.append(elText("span", "\u26A0", "tower-cmd-dg"));
       row.append(elText("span", c.name, "tower-cmd-sc"));
-      row.addEventListener("click", () => fillInput(c.name));
+      row.addEventListener("click", () => {
+        void executor.runCommand(c.name).then((r) => reportOutcome(c.name, r));
+      });
       wrap.appendChild(row);
     }
-  }
-  function fillInput(text) {
-    if (!nlInput) return;
-    nlInput.value = text;
-    nlInput.focus();
-    nlInput.setSelectionRange(text.length, text.length);
-    renderPalette();
   }
   function clearLive() {
     if (!liveBox) return;
@@ -470,7 +819,9 @@ function createTowerModal(deps) {
       ex.append(elText("span", "\u2726", "tower-ex-mk"));
       ex.append(elText("span", `"${text}"`, "tower-ex-tx"));
       ex.append(elText("span", "\u23CE", "tower-ex-go"));
-      ex.addEventListener("click", () => fillInput(text));
+      ex.addEventListener("click", () => {
+        void executor.runExample(i).then((r) => reportOutcome(`"${text}"`, r));
+      });
       exs.appendChild(ex);
     });
     main.appendChild(exs);
@@ -535,6 +886,8 @@ function createTowerModal(deps) {
       subs = [];
       undrag?.();
       undrag = null;
+      confirmOv?.remove();
+      confirmOv = null;
       ov.remove();
       ov = null;
       palWrap = liveBox = null;
@@ -555,6 +908,8 @@ function createTowerModal(deps) {
       subs = [];
       undrag?.();
       undrag = null;
+      confirmOv?.remove();
+      confirmOv = null;
       ov?.remove();
       ov = null;
       palWrap = liveBox = null;

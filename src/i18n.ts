@@ -122,6 +122,42 @@ const strings = {
     en: "Agent stream appears here once orchestration starts.",
     ko: "오케스트레이션이 시작되면 에이전트 스트림이 여기 흐릅니다.",
   },
+  towerConfirmTitle: {
+    en: "Confirm dangerous command",
+    ko: "위험 명령 확인",
+  },
+  towerConfirmDestructive: {
+    en: "This will close or remove something. Run it?",
+    ko: "이 명령은 닫거나 제거합니다. 실행할까요?",
+  },
+  towerConfirmInject: {
+    en: "This will inject input or send data. Run it?",
+    ko: "이 명령은 입력을 주입하거나 데이터를 보냅니다. 실행할까요?",
+  },
+  towerConfirmRun: {
+    en: "Run",
+    ko: "실행",
+  },
+  towerConfirmCancel: {
+    en: "Cancel",
+    ko: "취소",
+  },
+  towerRunOk: {
+    en: "Done.",
+    ko: "완료.",
+  },
+  towerRunNeedsTarget: {
+    en: "No matching target found.",
+    ko: "대상을 찾지 못했습니다.",
+  },
+  towerRunDenied: {
+    en: "Cancelled.",
+    ko: "취소됨.",
+  },
+  towerRunFailed: {
+    en: "Command failed.",
+    ko: "명령 실패.",
+  },
 } as const;
 
 export type I18nKey = keyof typeof strings;
