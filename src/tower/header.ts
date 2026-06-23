@@ -17,12 +17,13 @@ export interface TowerHandle {
   dispose: () => void;
 }
 
-// 타워 타이틀바 액션 + 모달 셸을 설치한다. 액션 클릭이 모달을 토글하고, active 가 열림 상태를 반영.
-// app = ctx.app, label = 표시 텍스트(i18n "AI 명령").
-export function setupTower(app: any, label: string): TowerHandle {
+// 타워 타이틀바 액션 + 모달(본문 포함)을 설치한다. 액션 클릭이 모달을 토글하고, active 가 열림 상태를 반영.
+// app = ctx.app(모달 본문이 commands.execute/events.on/bus.on 으로 라이브 데이터를 끌어옴),
+// label = 표시 텍스트(i18n "AI 명령"), lang = 현재 호스트 언어 접근자(locale.changed 로 갱신됨).
+export function setupTower(app: any, label: string, lang: () => string): TowerHandle {
   // 모달 상태 변화(열림/닫힘)는 onChange 한 채널로만 헤더 active 에 반영한다(이벤트-우선, 폴링 0).
   //   호출원(아이콘 클릭·닫기버튼·프로그램·향후 ⌘K) 무관하게 active 가 항상 정확.
-  const modal: TowerModal = createTowerModal(label, () => render());
+  const modal: TowerModal = createTowerModal({ title: label, lang, app, onChange: () => render() });
 
   // active 토글 상태를 액션에 반영하려면 같은 id 로 재등록한다(headerActions 가 id 교체 = 갱신).
   let unregister: (() => void) | null = null;

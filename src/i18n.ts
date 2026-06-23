@@ -94,6 +94,34 @@ const strings = {
     en: "AI Command",
     ko: "AI 명령",
   },
+  towerSubtitle: {
+    en: "Window control · Command translation · Search",
+    ko: "창 제어 · 명령 변환 · 검색",
+  },
+  towerInputPlaceholder: {
+    en: 'Type in natural language — "close the left panel and show the terminal big"',
+    ko: '자연어로 입력 — "왼쪽 창 닫고 터미널 크게 보여줘"',
+  },
+  towerExamplesTitle: {
+    en: "Window control — click to let AI run it",
+    ko: "창 제어 — 클릭하면 AI가 실행",
+  },
+  towerPaletteTitle: {
+    en: "Commands",
+    ko: "명령",
+  },
+  towerPaletteEmpty: {
+    en: "No commands match",
+    ko: "일치하는 명령 없음",
+  },
+  towerLiveTitle: {
+    en: "Live",
+    ko: "라이브",
+  },
+  towerLiveEmpty: {
+    en: "Agent stream appears here once orchestration starts.",
+    ko: "오케스트레이션이 시작되면 에이전트 스트림이 여기 흐릅니다.",
+  },
 } as const;
 
 export type I18nKey = keyof typeof strings;

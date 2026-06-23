@@ -139,6 +139,34 @@ var strings = {
   towerTitle: {
     en: "AI Command",
     ko: "AI \uBA85\uB839"
+  },
+  towerSubtitle: {
+    en: "Window control \xB7 Command translation \xB7 Search",
+    ko: "\uCC3D \uC81C\uC5B4 \xB7 \uBA85\uB839 \uBCC0\uD658 \xB7 \uAC80\uC0C9"
+  },
+  towerInputPlaceholder: {
+    en: 'Type in natural language \u2014 "close the left panel and show the terminal big"',
+    ko: '\uC790\uC5F0\uC5B4\uB85C \uC785\uB825 \u2014 "\uC67C\uCABD \uCC3D \uB2EB\uACE0 \uD130\uBBF8\uB110 \uD06C\uAC8C \uBCF4\uC5EC\uC918"'
+  },
+  towerExamplesTitle: {
+    en: "Window control \u2014 click to let AI run it",
+    ko: "\uCC3D \uC81C\uC5B4 \u2014 \uD074\uB9AD\uD558\uBA74 AI\uAC00 \uC2E4\uD589"
+  },
+  towerPaletteTitle: {
+    en: "Commands",
+    ko: "\uBA85\uB839"
+  },
+  towerPaletteEmpty: {
+    en: "No commands match",
+    ko: "\uC77C\uCE58\uD558\uB294 \uBA85\uB839 \uC5C6\uC74C"
+  },
+  towerLiveTitle: {
+    en: "Live",
+    ko: "\uB77C\uC774\uBE0C"
+  },
+  towerLiveEmpty: {
+    en: "Agent stream appears here once orchestration starts.",
+    ko: "\uC624\uCF00\uC2A4\uD2B8\uB808\uC774\uC158\uC774 \uC2DC\uC791\uB418\uBA74 \uC5D0\uC774\uC804\uD2B8 \uC2A4\uD2B8\uB9BC\uC774 \uC5EC\uAE30 \uD750\uB985\uB2C8\uB2E4."
   }
 };
 function t(key, lang) {
@@ -152,30 +180,127 @@ function tp(key, lang, vars) {
 }
 
 // src/tower/modal.ts
+var TOWER_LIVE_TOPIC = "clubhouse.tower.live";
+var EXAMPLES = [
+  "\uC5D0\uB514\uD130 \uD328\uB110 \uB2EB\uC544\uC918",
+  "\uD130\uBBF8\uB110 \uD328\uB110 \uB2EB\uC544\uC918",
+  "\uBD84\uD560 \uBC18\uBC18\uC73C\uB85C \uB9DE\uCDB0\uC918",
+  "\uB2E4\uD06C \uBAA8\uB4DC\uB85C \uBC14\uAFD4\uC918",
+  "\uB2E4\uC74C \uD14C\uB9C8\uB85C \uBC14\uAFD4\uC918"
+];
 var STYLE_ID = "tower-modal-style";
 var CSS = `
 .tower-ov{position:fixed;left:50%;top:76px;transform:translateX(-50%);width:560px;max-width:calc(100vw - 32px);
   z-index:9001;background:var(--card,#262626);color:var(--fg,#e6e6e6);border:1px solid var(--bd,#3a3a3a);
   border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.45),0 2px 8px rgba(0,0,0,.3);
-  font:13px system-ui,-apple-system,sans-serif;overflow:hidden;display:flex;flex-direction:column}
+  font:13px system-ui,-apple-system,sans-serif;overflow:hidden;display:flex;flex-direction:column;max-height:calc(100vh - 110px)}
 .tower-hd{display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--bd,#3a3a3a);
   cursor:grab;user-select:none;flex:0 0 auto}
 .tower-hd.drag{cursor:grabbing}
 .tower-mk{display:inline-flex;align-items:center;color:var(--acc,#7aa2f7)}
-.tower-tt{font-weight:700;letter-spacing:.01em;flex:1 1 auto;white-space:nowrap}
+.tower-htxt{flex:1 1 auto;min-width:0}
+.tower-tt{font-weight:700;letter-spacing:.01em;white-space:nowrap}
+.tower-sub{font-size:10.5px;color:var(--fg3,#888);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tower-grip{opacity:.4;letter-spacing:2px;font-size:11px;cursor:grab;user-select:none}
 .tower-x{appearance:none;border:0;background:transparent;color:inherit;opacity:.6;cursor:pointer;
   font-size:15px;line-height:1;padding:3px 6px;border-radius:6px}
 .tower-x:hover{opacity:1;background:var(--inset,rgba(127,127,127,.14))}
-.tower-bd{padding:14px;min-height:96px}
+/* \uBCF8\uBB38 = \uC88C(\uC785\uB825\xB7\uC608\uC2DC\xB7\uD314\uB808\uD2B8) | \uC6B0(\uB77C\uC774\uBE0C) 2\uC5F4 */
+.tower-bd{display:flex;min-height:0;flex:1 1 auto}
+.tower-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;padding:12px;gap:11px;overflow-y:auto}
+.tower-side{flex:0 0 188px;border-left:1px solid var(--bd,#3a3a3a);display:flex;flex-direction:column;min-height:0}
+/* NL \uC785\uB825\uBC14 */
+.tower-inwrap{display:flex;align-items:center;gap:8px;border:1px solid var(--bd,#3a3a3a);border-radius:9px;
+  background:var(--inset,rgba(127,127,127,.08));padding:8px 10px}
+.tower-inwrap:focus-within{border-color:var(--acc,#7aa2f7)}
+.tower-inmk{display:inline-flex;align-items:center;color:var(--acc,#7aa2f7);flex:0 0 auto}
+.tower-in{flex:1 1 auto;min-width:0;background:transparent;border:0;outline:0;color:var(--fg,#e6e6e6);font:inherit}
+.tower-in::placeholder{color:var(--fg3,#888)}
+.tower-enter{flex:0 0 auto;font-size:11px;color:var(--fg3,#888);border:1px solid var(--bd,#3a3a3a);
+  border-radius:5px;padding:0 5px;line-height:16px}
+/* \uC139\uC158 \uB77C\uBCA8 */
+.tower-sec{font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--fg3,#888)}
+/* \uC608\uC2DC\uD589 */
+.tower-exs{display:flex;flex-direction:column;gap:5px}
+.tower-ex{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;border:1px solid var(--bd,#3a3a3a);
+  background:var(--inset,rgba(127,127,127,.06));cursor:pointer;text-align:left;color:inherit;font:inherit}
+.tower-ex:hover{border-color:var(--acc,#7aa2f7);background:var(--accbg,rgba(122,162,247,.12))}
+.tower-ex-mk{color:var(--acc,#7aa2f7);flex:0 0 auto;font-size:12px}
+.tower-ex-tx{flex:1 1 auto;min-width:0}
+.tower-ex-go{flex:0 0 auto;font-size:11px;color:var(--fg3,#888)}
+/* \uD314\uB808\uD2B8 */
+.tower-pal{display:flex;flex-direction:column;gap:2px;max-height:208px;overflow-y:auto}
+.tower-cmd{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:7px;cursor:pointer;
+  color:inherit;font:inherit;text-align:left;border:1px solid transparent}
+.tower-cmd:hover{background:var(--accbg,rgba(122,162,247,.12));border-color:var(--acc,#7aa2f7)}
+.tower-cmd-ic{flex:0 0 18px;text-align:center;color:var(--fg3,#888);font-size:12px}
+.tower-cmd-tt{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tower-cmd-sc{flex:0 0 auto;font-size:10.5px;color:var(--fg3,#888);font-variant-numeric:tabular-nums;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.tower-cmd-dg{flex:0 0 auto;color:var(--danger-soft,#d77);font-size:11px}
+.tower-empty{font-size:11.5px;color:var(--fg3,#888);padding:8px 9px}
+/* \uB77C\uC774\uBE0C\uCE78 \u2014 Clubhouse st-bubble \uB8E9 \uC7AC\uC0AC\uC6A9 */
+.tower-live-hd{padding:9px 11px;border-bottom:1px solid var(--bd,#3a3a3a);font-size:10.5px;font-weight:700;
+  letter-spacing:.04em;text-transform:uppercase;color:var(--fg3,#888);flex:0 0 auto}
+.tower-live{flex:1 1 auto;min-height:120px;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
+.tower-live-empty{font-size:11px;color:var(--fg3,#888);line-height:1.45}
+.tower-lrow{display:flex;flex-direction:column;gap:2px;max-width:100%}
+.tower-lrow.user{align-items:flex-end}
+.tower-lwho{font-size:10px;color:var(--fg3,#888);font-weight:600;padding:0 3px}
+.tower-lbubble{padding:6px 9px;border-radius:9px;white-space:pre-wrap;word-break:break-word;line-height:1.42;
+  font-size:12px;background:var(--inset,rgba(127,127,127,.14))}
+.tower-lrow.user .tower-lbubble{background:var(--accbg,rgba(122,162,247,.18))}
 `;
+var ICON_BY_PREFIX = {
+  terminal: ">_",
+  panel: "\u25A4",
+  view: "\u25A4",
+  content: "\u25A4",
+  window: "\u2751",
+  file: "\u25A4",
+  fs: "\u25A4",
+  browser: "\u{1F310}",
+  bookmark: "\u2605",
+  theme: "\u25D0",
+  settings: "\u2699",
+  plugin: "\u2B21",
+  state: "\u2261",
+  status: "\u25F7",
+  ui: "\u22B9",
+  project: "\u25A2",
+  clipboard: "\u2398",
+  search: "\u2315"
+};
+function cmdIcon(name) {
+  const pre = name.split(".")[0];
+  return ICON_BY_PREFIX[pre] ?? "\xB7";
+}
+function cmdDanger(name) {
+  return /\.(close|remove|delete|kill|clear|reset|disable|quit|destroy)\b/.test(name);
+}
+function cmdTitle(name, description) {
+  const base = (description || "").split(" | ")[0].trim();
+  return base || name;
+}
 var ICON = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .962 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .962L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.962 0z" /></svg>';
+var ICON_SM = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .962 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .962L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.962 0z" /></svg>';
 function ensureStyle() {
   if (document.getElementById(STYLE_ID)) return;
   const s = document.createElement("style");
   s.id = STYLE_ID;
   s.textContent = CSS;
   document.head.appendChild(s);
+}
+function el(tag, cls) {
+  const e = document.createElement(tag);
+  e.className = cls;
+  return e;
+}
+function elText(tag, text, cls = "") {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  e.textContent = text;
+  return e;
 }
 function makeDraggable(ov, handle) {
   let sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
@@ -197,7 +322,10 @@ function makeDraggable(ov, handle) {
     window.removeEventListener("pointerup", onUp);
   };
   const onDown = (e) => {
-    if (e.target.closest(".tower-x")) return;
+    const target = e.target;
+    if (target.closest(".tower-x") || target.closest(".tower-in") || target.closest(".tower-ex") || target.closest(".tower-cmd")) {
+      return;
+    }
     const r = ov.getBoundingClientRect();
     ov.style.left = `${r.left}px`;
     ov.style.top = `${r.top}px`;
@@ -214,42 +342,172 @@ function makeDraggable(ov, handle) {
   handle.addEventListener("pointerdown", onDown);
   return () => handle.removeEventListener("pointerdown", onDown);
 }
-function createTowerModal(title, onChange) {
+function createTowerModal(deps) {
+  const { app, lang, onChange } = deps;
   ensureStyle();
   let ov = null;
   let undrag = null;
+  let subs = [];
+  let palWrap = null;
+  let liveBox = null;
+  let nlInput = null;
+  let catalog = [];
+  let liveActive = null;
+  const tr = (key) => t(key, lang());
   const emit = () => {
     try {
       onChange?.();
     } catch {
     }
   };
+  async function fetchCatalog() {
+    try {
+      const r = await app.commands.execute("state.commands", {});
+      const cmds = Array.isArray(r?.commands) ? r.commands : [];
+      catalog = cmds.filter((c) => c && typeof c.name === "string").map((c) => ({ name: c.name, description: String(c.description ?? "") }));
+    } catch {
+      catalog = [];
+    }
+    renderPalette();
+  }
+  function renderPalette() {
+    const wrap = palWrap;
+    if (!wrap) return;
+    const q = (nlInput?.value ?? "").trim().toLowerCase();
+    const rows = catalog.filter(
+      (c) => !q || c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q)
+    );
+    wrap.replaceChildren();
+    if (!rows.length) {
+      wrap.appendChild(elText("div", tr("towerPaletteEmpty"), "tower-empty"));
+      return;
+    }
+    for (const c of rows) {
+      const row = el("button", "tower-cmd");
+      row.type = "button";
+      row.dataset.node = `tower/cmd/${c.name}`;
+      row.append(elText("span", cmdIcon(c.name), "tower-cmd-ic"));
+      const tt = elText("span", cmdTitle(c.name, c.description), "tower-cmd-tt");
+      tt.title = c.name;
+      row.append(tt);
+      if (cmdDanger(c.name)) row.append(elText("span", "\u26A0", "tower-cmd-dg"));
+      row.append(elText("span", c.name, "tower-cmd-sc"));
+      row.addEventListener("click", () => fillInput(c.name));
+      wrap.appendChild(row);
+    }
+  }
+  function fillInput(text) {
+    if (!nlInput) return;
+    nlInput.value = text;
+    nlInput.focus();
+    nlInput.setSelectionRange(text.length, text.length);
+    renderPalette();
+  }
+  function clearLive() {
+    if (!liveBox) return;
+    liveBox.replaceChildren(elText("div", tr("towerLiveEmpty"), "tower-live-empty"));
+    liveActive = null;
+  }
+  function liveScroll() {
+    if (liveBox) liveBox.scrollTop = liveBox.scrollHeight;
+  }
+  function onLive(ev) {
+    const box = liveBox;
+    if (!box) return;
+    if (ev.kind === "reset") return clearLive();
+    box.querySelector(".tower-live-empty")?.remove();
+    if (ev.kind === "user") {
+      const row = el("div", "tower-lrow user");
+      row.append(elText("div", ev.who ?? "\uB098", "tower-lwho"), elText("div", ev.text ?? "", "tower-lbubble"));
+      box.appendChild(row);
+      liveActive = null;
+      return liveScroll();
+    }
+    if (ev.kind === "start") {
+      const row = el("div", "tower-lrow assistant");
+      const who = elText("div", ev.who ?? "", "tower-lwho");
+      if (ev.color) who.style.color = ev.color;
+      const bubble = el("div", "tower-lbubble");
+      row.append(who, bubble);
+      box.appendChild(row);
+      liveActive = { who: ev.who, color: ev.color, text: bubble };
+      return liveScroll();
+    }
+    if (ev.kind === "delta") {
+      if (!liveActive) onLive({ kind: "start", who: ev.who, color: ev.color });
+      if (liveActive) liveActive.text.textContent = (liveActive.text.textContent || "") + (ev.text ?? "");
+      return liveScroll();
+    }
+    if (ev.kind === "end") {
+      if (liveActive && ev.text) liveActive.text.textContent = ev.text;
+      liveActive = null;
+      return liveScroll();
+    }
+  }
+  function buildBody(body) {
+    const main = el("div", "tower-main");
+    const inwrap = el("div", "tower-inwrap");
+    const inmk = el("span", "tower-inmk");
+    inmk.innerHTML = ICON_SM;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "tower-in";
+    input.placeholder = tr("towerInputPlaceholder");
+    input.dataset.node = "tower/input";
+    input.addEventListener("input", () => renderPalette());
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") e.preventDefault();
+    });
+    nlInput = input;
+    inwrap.append(inmk, input, elText("span", "\u23CE", "tower-enter"));
+    main.appendChild(inwrap);
+    main.appendChild(elText("div", tr("towerExamplesTitle"), "tower-sec"));
+    const exs = el("div", "tower-exs");
+    EXAMPLES.forEach((text, i) => {
+      const ex = el("button", "tower-ex");
+      ex.type = "button";
+      ex.dataset.node = `tower/example/${i}`;
+      ex.append(elText("span", "\u2726", "tower-ex-mk"));
+      ex.append(elText("span", `"${text}"`, "tower-ex-tx"));
+      ex.append(elText("span", "\u23CE", "tower-ex-go"));
+      ex.addEventListener("click", () => fillInput(text));
+      exs.appendChild(ex);
+    });
+    main.appendChild(exs);
+    main.appendChild(elText("div", tr("towerPaletteTitle"), "tower-sec"));
+    const pal = el("div", "tower-pal");
+    palWrap = pal;
+    pal.appendChild(elText("div", tr("towerPaletteEmpty"), "tower-empty"));
+    main.appendChild(pal);
+    const side = el("div", "tower-side");
+    side.append(elText("div", tr("towerLiveTitle"), "tower-live-hd"));
+    const live = el("div", "tower-live");
+    live.dataset.node = "tower/live";
+    liveBox = live;
+    side.appendChild(live);
+    clearLive();
+    body.append(main, side);
+  }
   const build = () => {
-    const root = document.createElement("div");
-    root.className = "tower-ov";
+    const root = el("div", "tower-ov");
     root.dataset.node = "tower/modal";
-    const hd = document.createElement("div");
-    hd.className = "tower-hd";
-    const mk = document.createElement("span");
-    mk.className = "tower-mk";
+    const hd = el("div", "tower-hd");
+    const mk = el("span", "tower-mk");
     mk.innerHTML = ICON;
-    const tt = document.createElement("span");
-    tt.className = "tower-tt";
-    tt.textContent = title;
-    const grip = document.createElement("span");
-    grip.className = "tower-grip";
-    grip.textContent = "\u283F";
-    const x = document.createElement("button");
+    const htxt = el("div", "tower-htxt");
+    htxt.append(elText("div", deps.title, "tower-tt"), elText("div", tr("towerSubtitle"), "tower-sub"));
+    const grip = elText("span", "\u283F", "tower-grip");
+    grip.dataset.node = "tower/grip";
+    const x = el("button", "tower-x");
     x.type = "button";
-    x.className = "tower-x";
     x.textContent = "\u2715";
     x.title = "\uB2EB\uAE30";
     x.dataset.node = "tower/close";
     x.addEventListener("click", () => api.close());
-    hd.append(mk, tt, grip, x);
-    const bd = document.createElement("div");
-    bd.className = "tower-bd";
+    hd.append(mk, htxt, grip, x);
+    const bd = el("div", "tower-bd");
     bd.dataset.node = "tower/body";
+    buildBody(bd);
     root.append(hd, bd);
     undrag = makeDraggable(root, hd);
     return root;
@@ -260,23 +518,47 @@ function createTowerModal(title, onChange) {
       if (ov) return;
       ov = build();
       document.body.appendChild(ov);
+      subs.push(app.bus.on(TOWER_LIVE_TOPIC, (p) => onLive(p)));
+      subs.push(app.events.on("theme.changed", () => fetchCatalog()));
+      subs.push(app.events.on("locale.changed", () => fetchCatalog()));
+      void fetchCatalog();
       emit();
     },
     close: () => {
       if (!ov) return;
+      for (const off of subs) {
+        try {
+          off.dispose();
+        } catch {
+        }
+      }
+      subs = [];
       undrag?.();
       undrag = null;
       ov.remove();
       ov = null;
+      palWrap = liveBox = null;
+      nlInput = null;
+      catalog = [];
+      liveActive = null;
       emit();
     },
     toggle: () => ov ? api.close() : api.open(),
     // dispose — 액션 해지 중 호출되므로 onChange 재렌더를 일으키지 않는다(누수 방지).
     dispose: () => {
+      for (const off of subs) {
+        try {
+          off.dispose();
+        } catch {
+        }
+      }
+      subs = [];
       undrag?.();
       undrag = null;
       ov?.remove();
       ov = null;
+      palWrap = liveBox = null;
+      nlInput = null;
     }
   };
   return api;
@@ -284,8 +566,8 @@ function createTowerModal(title, onChange) {
 
 // src/tower/header.ts
 var SPARKLE_ICON = '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .962 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .962L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.962 0z" />';
-function setupTower(app, label) {
-  const modal = createTowerModal(label, () => render());
+function setupTower(app, label, lang) {
+  const modal = createTowerModal({ title: label, lang, app, onChange: () => render() });
   let unregister = null;
   const render = () => {
     unregister = app.ui.registerHeaderAction({
@@ -530,13 +812,14 @@ var main_default = {
     const app = ctx.app;
     const core = (name, params) => app.commands.execute("plugin.soksak-plugin-agents-acp." + name, params ?? {});
     const engine = createEngine(app);
+    const liveEmit = (ev) => app.bus.emit(TOWER_LIVE_TOPIC, ev);
     let lang = app.locale?.() ?? "ko";
     ctx.subscriptions.push(
       app.events.on("locale.changed", (e) => {
         lang = e.language;
       })
     );
-    const tower = setupTower(app, t("towerTitle", lang));
+    const tower = setupTower(app, t("towerTitle", lang), () => lang);
     ctx.subscriptions.push({ dispose: () => tower.dispose() });
     const settingPolicy = () => app.settings?.get("permissionPolicy") || void 0;
     const settingMode = () => {
@@ -713,12 +996,12 @@ var main_default = {
       container.replaceChildren();
     }
     function buildClubhouse(container, root) {
-      const bar = el("div", "st-bar");
-      const tabsEl = el("div", "st-tabs");
-      const kibEl = el("div", "st-kib");
-      const status = el("div", "st-status");
-      const msgs = el("div", "st-msgs");
-      const inrow = el("div", "st-in");
+      const bar = el2("div", "st-bar");
+      const tabsEl = el2("div", "st-tabs");
+      const kibEl = el2("div", "st-kib");
+      const status = el2("div", "st-status");
+      const msgs = el2("div", "st-msgs");
+      const inrow = el2("div", "st-in");
       const ta = document.createElement("textarea");
       ta.placeholder = t("placeholder", lang);
       ta.rows = 1;
@@ -726,7 +1009,7 @@ var main_default = {
       const send = document.createElement("button");
       send.textContent = t("sendBtn", lang);
       send.dataset.node = "send";
-      const mentionPop = el("div", "st-mention");
+      const mentionPop = el2("div", "st-mention");
       mentionPop.style.display = "none";
       inrow.append(mentionPop, ta, send);
       const st = {
@@ -749,7 +1032,7 @@ var main_default = {
       activeClubhouse = st;
       buildKibitz(st);
       renderTabs(st, tabsEl);
-      bar.append(elText("b", "Clubhouse"), tabsEl, kibEl, status);
+      bar.append(elText2("b", "Clubhouse"), tabsEl, kibEl, status);
       root.append(bar, msgs, inrow);
       const doSend = () => {
         const t2 = ta.value.trim();
@@ -772,9 +1055,9 @@ var main_default = {
       const renderMention = () => {
         mentionPop.replaceChildren();
         menTokens.forEach((t2, i) => {
-          const row = el("div", "st-mention-item" + (i === menActive ? " on" : ""));
+          const row = el2("div", "st-mention-item" + (i === menActive ? " on" : ""));
           row.style.color = COLOR[t2.id] ?? "var(--fg,#ddd)";
-          row.append(elText("span", "@", "st-mention-at"), elText("span", t2.label, "st-mention-nm"));
+          row.append(elText2("span", "@", "st-mention-at"), elText2("span", t2.label, "st-mention-nm"));
           row.addEventListener("pointerdown", (e) => {
             e.preventDefault();
             pickMention(i);
@@ -863,17 +1146,17 @@ var main_default = {
       tabsEl.replaceChildren();
       st.roster.forEach((entry) => {
         const a = AGENTS.find((x) => x.id === entry.id);
-        const chip = el("div", "st-tab" + (entry.checked ? "" : " off"));
+        const chip = el2("div", "st-tab" + (entry.checked ? "" : " off"));
         chip.style.color = a?.color ?? "#888";
         chip.dataset.id = entry.id;
         chip.dataset.node = `tab/${entry.id}`;
-        const chk = el("span", "chk");
+        const chk = el2("span", "chk");
         chk.textContent = entry.checked ? "\u2713" : "";
-        const nm = elText("span", a?.label ?? entry.id, "nm");
+        const nm = elText2("span", a?.label ?? entry.id, "nm");
         nm.style.color = "var(--fg,#ddd)";
         chip.append(chk, nm);
         if (st.mode === "facil" && entry.checked) {
-          const crown = elText("span", "\u{1F451}", "st-crown" + (entry.id === st.facilitatorId ? " on" : ""));
+          const crown = elText2("span", "\u{1F451}", "st-crown" + (entry.id === st.facilitatorId ? " on" : ""));
           crown.title = t("crownTitle", lang);
           crown.dataset.node = `crown/${entry.id}`;
           crown.addEventListener("click", (e) => {
@@ -1000,6 +1283,7 @@ var main_default = {
       }
       const cur = { agentId: speaker, connId, sessionId, row, bubble: null, liveRaw: "" };
       st.actives.add(cur);
+      liveEmit({ kind: "start", who: nameOf(speaker), color: COLOR[speaker] });
       const off = app.bus.on(`acp.update.${connId}`, (evt) => onStream(cur, evt));
       let r;
       try {
@@ -1014,6 +1298,7 @@ var main_default = {
       if (work) {
         (cur.bubble ?? (cur.bubble = row.toBubble())).textContent = work;
         row.setEnd();
+        liveEmit({ kind: "end", who: nameOf(speaker), color: COLOR[speaker], text: work });
         if (typeof r.reasoning === "string" && r.reasoning) row.setReasoning(r.reasoning);
         return work;
       }
@@ -1202,23 +1487,25 @@ var main_default = {
       if (t2) {
         if (!cur.bubble) cur.bubble = cur.row.toBubble();
         cur.bubble.textContent = (cur.bubble.textContent || "") + t2;
+        liveEmit({ kind: "delta", who: nameOf(cur.agentId), color: COLOR[cur.agentId], text: t2 });
       }
     }
     function renderUser(st, text) {
-      const row = el("div", "st-row user");
-      const who = el("div", "st-who");
-      who.append(elText("span", t("whoMe", lang), "st-who-name"), elText("span", ` \xB7 ${hhmmss()}`, "st-who-time"));
+      const row = el2("div", "st-row user");
+      const who = el2("div", "st-who");
+      who.append(elText2("span", t("whoMe", lang), "st-who-name"), elText2("span", ` \xB7 ${hhmmss()}`, "st-who-time"));
       row.append(who, bubble(text));
       st.msgs.appendChild(row);
       scroll(st);
+      liveEmit({ kind: "user", who: t("whoMe", lang), text });
     }
     function renderQueued(st) {
       clearQueued(st);
       const last = st.pendingHuman[st.pendingHuman.length - 1] ?? "";
-      const row = el("div", "st-row user queued");
+      const row = el2("div", "st-row user queued");
       row.dataset.queued = "1";
-      const who = el("div", "st-who");
-      who.append(elText("span", t("whoMe", lang), "st-who-name"), elText("span", t("queuedTag", lang), "st-queued-tag"));
+      const who = el2("div", "st-who");
+      who.append(elText2("span", t("whoMe", lang), "st-who-name"), elText2("span", t("queuedTag", lang), "st-queued-tag"));
       row.append(who, bubble(last));
       st.msgs.appendChild(row);
       scroll(st);
@@ -1232,17 +1519,17 @@ var main_default = {
     function showInterjectAlert(st, who, cb) {
       const root = st.msgs.parentElement ?? st.msgs;
       st.msgs.parentElement?.querySelectorAll(".st-modal").forEach((n) => n.remove());
-      const back = el("div", "st-modal");
-      const box = el("div", "st-modal-box");
-      box.append(elText("div", tp("modalTitle", lang, { who }), "st-modal-title"));
-      box.append(elText("div", t("modalMsg", lang), "st-modal-msg"));
-      const btns = el("div", "st-modal-btns");
+      const back = el2("div", "st-modal");
+      const box = el2("div", "st-modal-box");
+      box.append(elText2("div", tp("modalTitle", lang, { who }), "st-modal-title"));
+      box.append(elText2("div", t("modalMsg", lang), "st-modal-msg"));
+      const btns = el2("div", "st-modal-btns");
       const close = (c) => {
         back.remove();
         cb(c);
       };
       const mk = (label, c, primary) => {
-        const b = elText("button", label, "st-modal-btn" + (primary ? " primary" : ""));
+        const b = elText2("button", label, "st-modal-btn" + (primary ? " primary" : ""));
         b.dataset.node = `modal/${c}`;
         b.addEventListener("click", () => close(c));
         return b;
@@ -1256,16 +1543,16 @@ var main_default = {
       root.appendChild(back);
     }
     function renderTurnRow(st, agentId) {
-      const row = el("div", "st-row assistant");
-      const who = el("div", "st-who");
-      const nameEl = elText("span", nameOf(agentId), "st-who-name");
+      const row = el2("div", "st-row assistant");
+      const who = el2("div", "st-who");
+      const nameEl = elText2("span", nameOf(agentId), "st-who-name");
       nameEl.style.color = COLOR[agentId] ?? "var(--fg3,#888)";
-      const timeEl = el("span", "st-who-time");
+      const timeEl = el2("span", "st-who-time");
       const startStamp = hhmmss();
       timeEl.textContent = ` \xB7 ${startStamp}`;
       who.append(nameEl, timeEl);
-      const pending = el("div", "st-pending");
-      pending.append(el("span", "st-dot"), document.createTextNode(t("pending", lang)));
+      const pending = el2("div", "st-pending");
+      pending.append(el2("span", "st-dot"), document.createTextNode(t("pending", lang)));
       row.append(who, pending);
       st.msgs.appendChild(row);
       scroll(st);
@@ -1278,19 +1565,19 @@ var main_default = {
       };
       return {
         toBubble() {
-          const box = el("div", "st-bubble");
-          const text = el("span", "st-bubble-text");
-          const time = el("span", "st-box-time");
+          const box = el2("div", "st-bubble");
+          const text = el2("span", "st-bubble-text");
+          const time = el2("span", "st-box-time");
           box.append(text, time);
           endTimeEl = time;
           swap(box);
           return text;
         },
         fail(reason) {
-          const box = el("div", "st-fail");
+          const box = el2("div", "st-fail");
           box.title = reason;
-          const time = el("span", "st-box-time");
-          box.append(elText("span", `\u26A0 ${reason}`, "st-fail-text"), time);
+          const time = el2("span", "st-box-time");
+          box.append(elText2("span", `\u26A0 ${reason}`, "st-fail-text"), time);
           endTimeEl = time;
           swap(box);
         },
@@ -1301,9 +1588,9 @@ var main_default = {
         // 리소닝/띵킹(agent_thought_chunk) — 💭 배지(클릭하면 펼침). 작업 텍스트와 분리, 기본 접힘.
         setReasoning(text) {
           if (!text.trim()) return;
-          const badge = elText("span", t("thinkBadge", lang), "st-think");
+          const badge = elText2("span", t("thinkBadge", lang), "st-think");
           badge.title = t("thinkBadgeTitle", lang);
-          const panel = elText("div", text, "st-think-body");
+          const panel = elText2("div", text, "st-think-body");
           panel.style.display = "none";
           badge.addEventListener("click", () => {
             const open = panel.style.display === "none";
@@ -1322,12 +1609,12 @@ var main_default = {
     function scroll(st) {
       st.msgs.scrollTop = st.msgs.scrollHeight;
     }
-    function el(tag, cls) {
+    function el2(tag, cls) {
       const e = document.createElement(tag);
       e.className = cls;
       return e;
     }
-    function elText(tag, text, cls = "") {
+    function elText2(tag, text, cls = "") {
       const e = document.createElement(tag);
       if (cls) e.className = cls;
       e.textContent = text;
@@ -1339,7 +1626,7 @@ var main_default = {
       return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }
     function bubble(text) {
-      const b = el("div", "st-bubble");
+      const b = el2("div", "st-bubble");
       b.textContent = text;
       return b;
     }

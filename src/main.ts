@@ -13,6 +13,7 @@
 import { createEngine } from "./engine";
 import { t, tp } from "./i18n";
 import { setupTower } from "./tower/header";
+import { TOWER_LIVE_TOPIC, type TowerLiveEvent } from "./tower/modal";
 import {
   buildPrompt,
   detectMentions,
@@ -142,6 +143,11 @@ export default {
       app.commands.execute("plugin.soksak-plugin-agents-acp." + name, params ?? {});
     const engine = createEngine(app);
 
+    // 라이브 relay — Clubhouse 스트림(단일 진실: onStream/runOneTurn/renderUser)을 stable bus 토픽으로
+    //   재방송한다. 타워 라이브칸이 connId 추측 없이 이 한 토픽만 구독(이벤트-우선, 폴링 0). content 탭 렌더는
+    //   그대로 두고 emit 한 줄만 additive — content 탭과 모달이 같은 오케스트레이션을 동시 반영.
+    const liveEmit = (ev: TowerLiveEvent) => app.bus.emit(TOWER_LIVE_TOPIC, ev);
+
     let lang = app.locale?.() ?? "ko"; // 현재 언어 취득 — 없으면 ko 폴백
     ctx.subscriptions.push(
       app.events.on("locale.changed", (e: { language: string }) => {
@@ -151,7 +157,7 @@ export default {
 
     // ── 컨트롤 타워: 타이틀바 ✦ 액션 + AI-명령 모달(빈 셸, M2) ──
     // content 탭은 그대로 두고 타이틀바에 아이콘 1개를 추가(additive). 클릭 = 모달 토글.
-    const tower = setupTower(app, t("towerTitle", lang));
+    const tower = setupTower(app, t("towerTitle", lang), () => lang);
     ctx.subscriptions.push({ dispose: () => tower.dispose() });
 
     const settingPolicy = (): string | undefined =>
@@ -691,6 +697,7 @@ export default {
       // 버블은 아직 안 만든다 — "응답 중…" 인디케이터를 첫 스트리밍 청크(또는 최종 텍스트)까지 유지.
       const cur: Current = { agentId: speaker, connId, sessionId, row, bubble: null, liveRaw: "" };
       st.actives.add(cur); // 동시=N개 병렬 등록(각자 connId 로 독립 스트리밍)
+      liveEmit({ kind: "start", who: nameOf(speaker), color: COLOR[speaker] }); // 타워 라이브칸 발화 시작
       const off = app.bus.on(`acp.update.${connId}`, (evt: any) => onStream(cur, evt));
       let r: any;
       try {
@@ -706,6 +713,7 @@ export default {
       if (work) {
         (cur.bubble ?? (cur.bubble = row.toBubble())).textContent = work; // 인디케이터→버블(없었으면 생성)
         row.setEnd();
+        liveEmit({ kind: "end", who: nameOf(speaker), color: COLOR[speaker], text: work }); // 타워 라이브칸 종결(권위 텍스트)
         if (typeof r.reasoning === "string" && r.reasoning) row.setReasoning(r.reasoning); // 💭 배지
         return work;
       }
@@ -930,6 +938,8 @@ export default {
         // 첫 청크에서 "응답 중…" 인디케이터 → 버블 생성(그 전까진 인디케이터 유지).
         if (!cur.bubble) cur.bubble = cur.row.toBubble();
         cur.bubble.textContent = (cur.bubble.textContent || "") + t;
+        // 타워 라이브칸 relay — 같은 증분을 stable 토픽으로(이벤트-우선). start 는 delta 가 lazy 생성.
+        liveEmit({ kind: "delta", who: nameOf(cur.agentId), color: COLOR[cur.agentId], text: t });
       }
     }
 
@@ -941,6 +951,7 @@ export default {
       row.append(who, bubble(text));
       st.msgs.appendChild(row);
       scroll(st);
+      liveEmit({ kind: "user", who: t("whoMe", lang), text }); // 타워 라이브칸 relay — 사람 발화도 동시 반영
     }
 
     // 대기(wait) 중 사람 입력 — "대기 중" 배지로 미반영 표시(흐릿한 버블). 주입 시 clearQueued 로 제거.
