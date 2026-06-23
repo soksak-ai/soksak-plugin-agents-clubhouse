@@ -116,6 +116,113 @@ export function validatePlan(steps: PlanStep[], ctx: PlanContext): PlanValidatio
   return { ok: true };
 }
 
+// ── slow-path 도메인맵 주입 + plan 파싱(M5, 순수) ──
+//
+// slow-path = 모호 NL → planning 턴. executor 가 라이브 도메인맵(축1 state.commands · 축2 ui.tree · 축3
+//   status.query)을 호출 직전 캡처해 아래 buildPlanSystemPrompt 로 시스템 프롬프트에 **라이브 주입**한다.
+//   에이전트는 그 어휘/주소/상태 안에서만 PLAN(JSON step 배열)을 짠다 — 도메인맵 밖 command/주소는
+//   validatePlan 이 거부하고(미등록 거부 매트릭스 행), 그 에러를 다시 프롬프트에 되먹여 self-correct 한다.
+
+// 라이브 도메인맵 — 호출 직전 캡처한 3축 스냅샷. executor 가 read 명령으로 채우고 프롬프트에 직렬화한다.
+export interface DomainMap {
+  commands: Array<{ name: string; description?: string }>; // 축1 — state.commands.commands
+  addresses: string[]; // 축2 — ui.tree.nodes[].address
+  statuses: Array<{ viewId: string; code: string; message?: string }>; // 축3 — status.query.statuses
+}
+
+// 도메인맵 → 검증 컨텍스트(이름/주소 허용 집합). executor 가 validatePlan 에 그대로 넘긴다(단일 진실).
+export function planContextFromDomain(map: DomainMap): PlanContext {
+  return {
+    commandNames: new Set(map.commands.map((c) => c.name)),
+    domAddresses: new Set(map.addresses),
+  };
+}
+
+// planning 턴 시스템 프롬프트 — 라이브 도메인맵을 그대로 싣는다. 에이전트는 이 어휘/주소/상태 밖을
+//   쓰면 안 된다(쓰면 validatePlan 거부 → 되먹임). PLAN 은 JSON step 배열만, 코드펜스로 감싸도 무방.
+//   correction = 직전 검증 실패 사유(있으면 self-correct 지시로 덧붙인다, hop cap 은 executor).
+export function buildPlanSystemPrompt(nl: string, map: DomainMap, correction?: string): string {
+  // 축1 — command 어휘(이름 + 짧은 설명 base). 너무 길면 잘릴 수 있으니 base 만(description 의 ' | ' 앞).
+  const cmds = map.commands
+    .map((c) => {
+      const base = (c.description || "").split(" | ")[0].trim();
+      return base ? `  - ${c.name} — ${base}` : `  - ${c.name}`;
+    })
+    .join("\n");
+  // 축2 — 현재 화면 주소(ui.input.click/fill 대상). 비면 "(없음)".
+  const addrs = map.addresses.length ? map.addresses.map((a) => `  - ${a}`).join("\n") : "  (없음)";
+  // 축3 — 각 뷰가 보고한 현재 상태(dirty/busy/running 등). 사전검사·파괴 전 확인용.
+  const stats = map.statuses.length
+    ? map.statuses.map((s) => `  - ${s.viewId}: ${s.code}${s.message ? ` (${s.message})` : ""}`).join("\n")
+    : "  (없음)";
+  const correctionBlock = correction
+    ? `\n\n[직전 PLAN 이 거부되었습니다]\n${correction}\n위 도메인맵에 실제로 있는 command/주소만 쓰세요. 추측 금지.`
+    : "";
+  return (
+    `당신은 soksak 컨트롤 타워의 플래너입니다. 사용자의 자연어 요청을 아래 3축 도메인맵 안에서만 실행 가능한 PLAN 으로 변환하세요.\n` +
+    `\n[사용자 요청]\n${nl}\n` +
+    `\n[축1 — 사용 가능한 command (이 이름들만 허용)]\n${cmds}\n` +
+    `\n[축2 — 현재 화면의 조작 가능한 주소 (dom 축 ui.input.click/fill 대상, 이 주소들만 허용)]\n${addrs}\n` +
+    `\n[축3 — 각 뷰가 보고한 현재 상태 (파괴적 step 전에 확인)]\n${stats}\n` +
+    `\n[PLAN 형식 — 반드시 JSON 배열 하나만]\n` +
+    `각 step = {"axis":"command"|"dom"|"status", "name":"<command 이름>", "params":{...}} 또는 dom 은 {"axis":"dom","name":"ui.input.click","address":"<축2 주소>"}.\n` +
+    `- command/status 는 축1 이름만. dom 은 name 을 ui.input.click/ui.input.fill 로 두고 address 는 축2 주소만.\n` +
+    `- 파괴적(닫기/제거) command 앞엔 status step 으로 안전을 먼저 확인하세요.\n` +
+    `- 설명·인사·코드 설명 없이 PLAN(JSON 배열)만 출력하세요. 코드펜스로 감싸도 됩니다.` +
+    correctionBlock
+  );
+}
+
+// 에이전트 텍스트 → PlanStep[]. 코드펜스/산문에 섞인 첫 JSON 배열을 관대하게 추출(LLM 출력 내성).
+//   파싱 실패/배열 아님 → null(executor 가 PLAN_PARSE_FAILED 로 되먹임). 순수 — I/O 0.
+export function parsePlan(text: string): PlanStep[] | null {
+  if (typeof text !== "string") return null;
+  // 1) ```json … ``` 펜스 우선.
+  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  const candidates: string[] = [];
+  if (fence) candidates.push(fence[1]);
+  // 2) 펜스 밖 — 첫 '[' 부터 짝 맞는 ']' 까지 균형 스캔(중첩 [] 안전).
+  const bal = extractBalancedArray(text);
+  if (bal) candidates.push(bal);
+  candidates.push(text); // 3) 전체(순수 JSON 인 경우)
+  for (const c of candidates) {
+    const s = c.trim();
+    if (!s) continue;
+    try {
+      const v = JSON.parse(s);
+      if (Array.isArray(v)) return v as PlanStep[];
+    } catch {
+      // 다음 후보 시도
+    }
+  }
+  return null;
+}
+
+// 첫 '[' 부터 균형 잡힌 ']' 까지 부분문자열 추출(문자열 리터럴 내 괄호 무시). 없으면 null.
+function extractBalancedArray(text: string): string | null {
+  const start = text.indexOf("[");
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
 // 예시행 매핑 — 5 handoff 문장 → 실 코어 command + 라이브 파라미터 리졸버.
 //   command = 정식 레지스트리 이름(축1). resolveParams = 클릭 시점 라이브 상태(panel.list/theme.list/
 //   state.tree)에서 필수 파라미터를 채운다 — 정적 문장이 동적 컨텍스트로 해소(좌표 hallucination 0).

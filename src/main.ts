@@ -155,11 +155,6 @@ export default {
       }),
     );
 
-    // ── 컨트롤 타워: 타이틀바 ✦ 액션 + AI-명령 모달(빈 셸, M2) ──
-    // content 탭은 그대로 두고 타이틀바에 아이콘 1개를 추가(additive). 클릭 = 모달 토글.
-    const tower = setupTower(app, t("towerTitle", lang), () => lang);
-    ctx.subscriptions.push({ dispose: () => tower.dispose() });
-
     const settingPolicy = (): string | undefined =>
       (app.settings?.get("permissionPolicy") as string) || undefined;
     const settingMode = (): KibitzMode => {
@@ -174,6 +169,23 @@ export default {
 
     // 활성(마지막 마운트) Clubhouse 뷰 — send 명령이 라이브 대화를 프로그램적으로 구동(노출 command E2E).
     let activeClubhouse: ClubhouseState | null = null;
+
+    // ── 컨트롤 타워: 타이틀바 ✦ 액션 + AI-명령 모달(M2~M5) ──
+    // content 탭은 그대로 두고 타이틀바에 아이콘 1개를 추가(additive). 클릭 = 모달 토글.
+    // planner = slow-path planning 턴 seam(M5) — engine.requestPlan 으로 단발 연결(ask 동형, 권한 deny)을
+    //   써서 content 탭의 영속 연결·대화 상태를 건드리지 않는다. 진행자(facilitator) 또는 기본 claude 가
+    //   도메인맵 주입 프롬프트를 받아 PLAN 을 작성한다. cwd = 활성 뷰의 cwd(없으면 프로젝트 루트).
+    const towerPlanner = async (systemPrompt: string): Promise<string> => {
+      const st = activeClubhouse;
+      // 진행자 우선 → 체크된 첫 참여자 → 기본 claude(에이전트 미연결이면 requestPlan 이 throw).
+      const agent =
+        (st && (participants(st.roster).includes(st.facilitatorId) ? st.facilitatorId : participants(st.roster)[0])) ||
+        "claude";
+      const cwd = st?.cwd ?? projectCwd();
+      return engine.requestPlan({ agent }, systemPrompt, cwd);
+    };
+    const tower = setupTower(app, t("towerTitle", lang), () => lang, towerPlanner);
+    ctx.subscriptions.push({ dispose: () => tower.dispose() });
 
     // ── send(라이브 Clubhouse 에 사람 메시지 주입 — 노출 command 로만 E2E·자동화 구동) ──
     ctx.subscriptions.push(
@@ -220,6 +232,49 @@ export default {
             // streamed = 지금까지 받은 message 청크 누적 길이(thought 제외) — >0 이면 '출력 시작'.
             actives: [...st.actives].map((c) => ({ id: c.agentId, streamed: c.liveRaw.length })),
           };
+        },
+      }),
+    );
+
+    // ── tower.plan(타워 slow-path 헤드리스 구동 — 발화 E2E·자동화) ──
+    // 모호 NL → 도메인맵 라이브 주입 planning 턴 → 검증 → dry-run. 기본은 dry-run(실행 0): 검증된 step 배열만
+    //   반환. commit:true 면 dispatch — 비파괴는 바로, danger step 은 데스크톱 confirm 게이트(헤드리스에선
+    //   사람 클릭 없으면 GATE_REQUIRED 로 미실행 = 보안 불변식 유지). 노출 command 로 slow-path 전체를 자가검증.
+    ctx.subscriptions.push(
+      app.commands.register("tower.plan", {
+        description:
+          "Drive the control-tower slow-path headlessly: turn an ambiguous natural-language request into a validated 3-axis plan (command/dom/status) via a planning turn with the live domain map injected, then return a dry-run preview (no execution). Pass commit:true to dispatch the validated plan (safe steps run; destructive steps still require the desktop confirm gate). Use for utterance E2E and AI automation of the tower.",
+        triggers: { ko: "타워 계획 자연어 명령 변환 plan 슬로우패스 dry-run 컨트롤타워" },
+        params: {
+          text: { type: "string", required: true, description: "Natural-language request (e.g. \"close the left panel and show the terminal big\")." },
+          commit: { type: "boolean", description: "true = dispatch the validated plan after planning (destructive steps still gated). Omit/false = dry-run only (return steps, execute nothing)." },
+          plan: {
+            type: "array",
+            description:
+              "Deterministic E2E injection: a KNOWN plan (array of {axis, name, params|address}) to validate and dry-run instead of calling the live planning agent. Still validated (unknown command/address rejected) and still danger-gated on commit — no security bypass.",
+          },
+          render: {
+            type: "boolean",
+            description: "true = render the dry-run preview in the tower modal UI (opens it if closed) for visual snapshot verification. Requires plan injection.",
+          },
+        },
+        handler: async (p: any) => {
+          const text = String(p?.text ?? "").trim();
+          if (!text) return { ok: false, error: "text 필수" };
+          const inject = Array.isArray(p?.plan) ? (p.plan as any[]) : undefined;
+          // render:true + 주입 plan → 모달 UI 에 dry-run preview 렌더(시각 E2E). 실행 0.
+          if (p?.render === true && inject) {
+            const r = await tower.previewInject(text, inject as any);
+            if (!r.ok) return { ok: false, code: r.code, message: r.message };
+            return { ok: true, dryRun: true, rendered: true, steps: r.steps };
+          }
+          const res = await tower.planAndRun(text, inject ? { injectPlan: inject } : undefined);
+          if (!res.ok) return { ok: false, code: res.code, message: res.message };
+          // dry-run 결과 — 검증된 step(축/이름/주소/파라미터) 그대로 노출(투명). 아직 실행 0.
+          const steps = res.steps;
+          if (p?.commit !== true) return { ok: true, dryRun: true, steps };
+          const c = await res.commit();
+          return { ok: c.ok, committed: true, code: c.code, steps, results: c.results };
         },
       }),
     );

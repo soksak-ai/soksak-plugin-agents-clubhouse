@@ -24,7 +24,11 @@ import {
   CONFIRM_EXPOSED_NODES,
   type ConfirmGate,
   type TowerExecutor,
+  type Planner,
+  type PlanRunResult,
+  type PlanRunOptions,
 } from "./executor";
+import { EXAMPLE_COMMANDS, type PlanStep } from "./plan";
 
 // 라이브칸이 구독하는 stable bus 토픽 — Clubhouse 런타임(main.ts)이 스트림 단일 진실에서 재방송한다.
 //   acp.update.<connId> 는 connId 별이라 모달이 직접 못 잡는다 → main.ts onStream 이 이 토픽으로 relay(이벤트-우선).
@@ -38,14 +42,9 @@ export interface TowerLiveEvent {
   text?: string; // delta=증분, user=전체, end=최종(있으면 교체)
 }
 
-// 예시행(5) — handoff 고정 문구. 클릭 = NL 바를 이 문장으로 채움(실행 X, M4).
-const EXAMPLES = [
-  "에디터 패널 닫아줘",
-  "터미널 패널 닫아줘",
-  "분할 반반으로 맞춰줘",
-  "다크 모드로 바꿔줘",
-  "다음 테마로 바꿔줘",
-];
+// 예시행 문구 — plan.ts EXAMPLE_COMMANDS 의 text 단일 진실에서 파생(사본 금지 — fast-path EXACT 매치가
+//   같은 문자열에 의존하므로 한 출처여야 함). 클릭 = executor.runExample(i)(M4), Enter EXACT = 동일 경로(M5).
+const EXAMPLES = EXAMPLE_COMMANDS.map((e) => e.text);
 
 const STYLE_ID = "tower-modal-style";
 const CSS = `
@@ -87,6 +86,28 @@ const CSS = `
 .tower-ex-mk{color:var(--acc,#7aa2f7);flex:0 0 auto;font-size:12px}
 .tower-ex-tx{flex:1 1 auto;min-width:0}
 .tower-ex-go{flex:0 0 auto;font-size:11px;color:var(--fg3,#888)}
+/* dry-run plan 미리보기 — 예시행 룩 재사용(실행 전 plan step 표시, ⏎ 로 commit) */
+.tower-plan{display:flex;flex-direction:column;gap:6px;border:1px solid var(--acc,#7aa2f7);border-radius:9px;
+  padding:9px;background:var(--accbg,rgba(122,162,247,.08))}
+.tower-plan-hd{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--acc,#7aa2f7)}
+.tower-plan-hd .sp{flex:1 1 auto}
+.tower-plan-steps{display:flex;flex-direction:column;gap:4px}
+.tower-pstep{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:7px;border:1px solid var(--bd,#3a3a3a);
+  background:var(--inset,rgba(127,127,127,.06))}
+.tower-pstep-ax{flex:0 0 auto;font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+  color:var(--fg3,#888);border:1px solid var(--bd,#3a3a3a);border-radius:5px;padding:0 5px;line-height:15px}
+.tower-pstep-tx{flex:1 1 auto;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tower-pstep-dg{flex:0 0 auto;color:var(--danger-soft,#d77);font-size:11px}
+.tower-pstep-go{flex:0 0 auto;font-size:11px;color:var(--fg3,#888)}
+.tower-plan-act{display:flex;justify-content:flex-end;gap:7px;margin-top:2px}
+.tower-plan-btn{appearance:none;border:1px solid var(--bd,#3a3a3a);background:transparent;color:inherit;font:inherit;
+  font-size:11.5px;cursor:pointer;border-radius:7px;padding:4px 11px}
+.tower-plan-btn:hover{background:var(--inset,rgba(127,127,127,.14))}
+.tower-plan-btn.run{border-color:var(--acc,#7aa2f7);color:var(--acc,#7aa2f7);font-weight:600}
+.tower-plan-btn.run:hover{background:var(--accbg,rgba(122,162,247,.18))}
+.tower-plan-busy{font-size:11.5px;color:var(--fg3,#888);padding:4px 2px}
 /* 팔레트 */
 .tower-pal{display:flex;flex-direction:column;gap:2px;max-height:208px;overflow-y:auto}
 .tower-cmd{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:7px;cursor:pointer;
@@ -173,6 +194,7 @@ export interface TowerModalDeps {
   title: string;
   lang: () => string; // 현재 호스트 언어(locale.changed 로 갱신됨) — 본문 텍스트·재fetch 에 사용
   app: any; // ctx.app — commands.execute(팔레트) · events.on(재fetch) · bus.on(라이브)
+  planner?: Planner; // slow-path planning 턴 seam — 없으면 NL Enter 모호 입력이 NO_PLANNER 보고
   onChange?: () => void; // 열림/닫힘 변화 단일 채널(헤더 active 동기화, 이벤트-우선)
 }
 
@@ -182,6 +204,11 @@ export interface TowerModal {
   close: () => void;
   toggle: () => void;
   dispose: () => void;
+  // 헤드리스 slow-path 구동(노출 command·E2E) — executor.planAndRun 직통. 모달 open 비의존(executor 상주).
+  planAndRun: (nl: string, opts?: PlanRunOptions) => Promise<PlanRunResult>;
+  // 결정적 시각 E2E — KNOWN plan 을 모달 UI 에 dry-run preview 로 렌더(라이브 LLM 우회). 모달 닫혀 있으면
+  //   먼저 연다. 검증·게이트는 동일(주입 plan 도 validatePlan + danger 게이트). snapshot 으로 미리보기 확인용.
+  previewInject: (nl: string, steps: PlanStep[]) => Promise<PlanRunResult>;
 }
 
 interface CatalogCmd {
@@ -271,6 +298,8 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
   let palWrap: HTMLElement | null = null;
   let liveBox: HTMLElement | null = null;
   let nlInput: HTMLInputElement | null = null;
+  let planBox: HTMLElement | null = null; // dry-run plan 미리보기 슬롯(NL 바 아래, 예시행 위)
+  let planning = false; // slow-path 진행 중 — 중복 Enter 차단(직렬)
   let catalog: CatalogCmd[] = [];
   let liveActive: { who?: string; color?: string; text: HTMLElement } | null = null;
 
@@ -338,7 +367,7 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
     });
 
   // executor = 유일 실행점. 모달은 클릭을 여기로 넘기고 결과만 라이브칸에 반영(로직 누수 0, RULE 6).
-  const executor: TowerExecutor = createExecutor({ app, confirmGate, lang });
+  const executor: TowerExecutor = createExecutor({ app, confirmGate, lang, planner: deps.planner });
 
   // 실행 결과를 라이브칸 시스템 버블로 — 폴링 0, 사람 가시 피드백.
   function reportOutcome(label: string, r: { ok: boolean; code?: string }): void {
@@ -402,6 +431,134 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
     }
   }
 
+  // ── NL 바 Enter(M5) — fast-path/slow-path 분기 단일 진입점 ──
+  //   1) 입력이 예시행 문구/팔레트 command 와 EXACT-매치면 fast-path(M4) — 에이전트 우회 즉답.
+  //   2) 아니면 slow-path — executor.planAndRun(도메인맵 라이브 주입 planning 턴) → dry-run preview.
+  //      실행은 사람이 ⏎(commit) 눌러야. (안전모델: slow-path 는 항상 dry-run 우선.)
+  async function submitNL(): Promise<void> {
+    const raw = (nlInput?.value ?? "").trim();
+    if (!raw || planning) return;
+    // 1) fast-path EXACT 매치 — 예시 문구 그대로면 그 예시 실행(라이브 파라미터 해소·게이트 포함).
+    const exIdx = EXAMPLE_COMMANDS.findIndex((e) => e.text === raw);
+    if (exIdx >= 0) {
+      if (nlInput) nlInput.value = "";
+      clearPlanPreview();
+      renderPalette();
+      void executor.runExample(exIdx).then((r) => reportOutcome(`"${raw}"`, r));
+      return;
+    }
+    // 팔레트 command 이름 EXACT 매치(예: "theme.apply").
+    const cmd = catalog.find((c) => c.name === raw);
+    if (cmd) {
+      if (nlInput) nlInput.value = "";
+      clearPlanPreview();
+      renderPalette();
+      void executor.runCommand(cmd.name).then((r) => reportOutcome(cmd.name, r));
+      return;
+    }
+    // 2) slow-path — 모호 NL → planning 턴 → dry-run preview.
+    await runSlowPath(raw);
+  }
+
+  // slow-path 단일 경로 — planAndRun(라이브 또는 주입) → 성공 시 dry-run preview 렌더, 실패 시 사유 표시.
+  //   opts.injectPlan 주입 시 라이브 LLM 우회(결정적 E2E) — 검증·게이트는 동일. UI 진입점·헤드리스 공용.
+  async function runSlowPath(raw: string, opts?: PlanRunOptions): Promise<PlanRunResult> {
+    planning = true;
+    renderPlanBusy(tr("towerPlanning"));
+    onLive({ kind: "user", who: "✦", text: raw });
+    let res: PlanRunResult;
+    try {
+      res = await executor.planAndRun(raw, opts);
+    } catch (e) {
+      res = { ok: false, code: "PLAN_EXCEPTION", message: String((e as Error)?.message ?? e) };
+    }
+    planning = false;
+    if (!res.ok) {
+      const key: I18nKey = res.code === "NO_PLANNER" ? "towerPlanNoAgent" : "towerPlanFailed";
+      renderPlanBusy(tr(key), true);
+      onLive({ kind: "start", who: "✦" });
+      onLive({ kind: "end", text: tr(key) });
+      return res;
+    }
+    renderPlanPreview(raw, res.steps, res.commit);
+    return res;
+  }
+
+  // dry-run 진행/실패 메시지(plan 슬롯) — busy 표시. error=true 면 톤만 구분.
+  function renderPlanBusy(msg: string, _error = false): void {
+    const box = planBox;
+    if (!box) return;
+    box.replaceChildren(elText("div", msg, "tower-plan-busy"));
+    box.dataset.node = "tower/plan"; // RULE 8 — plan 미리보기 슬롯 노출
+  }
+
+  function clearPlanPreview(): void {
+    if (planBox) planBox.replaceChildren();
+  }
+
+  // dry-run plan 미리보기 — 검증된 step 을 행으로(예시행 룩). 각 행 data-node 전수 노출(RULE 8). 실행 0.
+  //   [계획 실행 ⏎] = commit() 디스패치(danger step 은 executor 의 confirm 게이트 경유). [버리기] = 폐기.
+  function renderPlanPreview(nl: string, steps: PlanStep[], commit: () => Promise<{ ok: boolean; code?: string }>): void {
+    const box = planBox;
+    if (!box) return;
+    box.replaceChildren();
+    const wrap = el("div", "tower-plan");
+    const hd = el("div", "tower-plan-hd");
+    hd.append(elText("span", "✦", ""), elText("span", tr("towerPlanTitle"), ""), el("span", "sp"));
+    wrap.appendChild(hd);
+
+    const stepsBox = el("div", "tower-plan-steps");
+    steps.forEach((s, i) => {
+      const row = el("div", "tower-pstep");
+      row.dataset.node = `tower/plan/step/${i}`; // RULE 8 — 각 preview step 노출
+      row.append(elText("span", s.axis, "tower-pstep-ax"));
+      const label = s.axis === "dom" ? `${s.name} ${s.address ?? ""}`.trim() : stepLabel(s);
+      const tx = elText("span", label, "tower-pstep-tx");
+      tx.title = label;
+      row.append(tx);
+      if (s.axis !== "dom" && cmdDanger(s.name)) row.append(elText("span", "⚠", "tower-pstep-dg"));
+      row.append(elText("span", "⏎", "tower-pstep-go"));
+      stepsBox.appendChild(row);
+    });
+    wrap.appendChild(stepsBox);
+
+    const act = el("div", "tower-plan-act");
+    const discard = el("button", "tower-plan-btn");
+    (discard as HTMLButtonElement).type = "button";
+    discard.textContent = tr("towerPlanDiscard");
+    discard.dataset.node = "tower/plan/discard"; // RULE 8
+    discard.addEventListener("click", () => clearPlanPreview());
+    const run = el("button", "tower-plan-btn run");
+    (run as HTMLButtonElement).type = "button";
+    run.textContent = `${tr("towerPlanRunAll")} ⏎`;
+    run.dataset.node = "tower/plan/run"; // RULE 8 — ⏎ commit 어포던스
+    let committing = false;
+    const doCommit = () => {
+      if (committing) return;
+      committing = true;
+      (run as HTMLButtonElement).disabled = true;
+      void commit().then((r) => {
+        clearPlanPreview();
+        if (nlInput) nlInput.value = "";
+        renderPalette();
+        reportOutcome(`"${nl}"`, r.ok ? { ok: true } : r);
+      });
+    };
+    run.addEventListener("click", doCommit);
+    act.append(discard, run);
+    wrap.appendChild(act);
+    box.appendChild(wrap);
+    box.dataset.node = "tower/plan";
+    // 기본 포커스를 실행 버튼에 — 사람이 곧바로 ⏎ 로 commit(dry-run 검토 후 한 키).
+    (run as HTMLButtonElement).focus();
+  }
+
+  // plan step 표시 라벨 — command/status 는 name + params 요약(mono). 좌표 hallucination 없는 정확 표기.
+  function stepLabel(s: PlanStep): string {
+    const p = s.params && Object.keys(s.params).length ? ` ${JSON.stringify(s.params)}` : "";
+    return `${s.name}${p}`;
+  }
+
   // ── 라이브칸(이벤트-우선) — main.ts 가 TOWER_LIVE_TOPIC 으로 재방송한 스트림을 버블로 ──
   function clearLive(): void {
     if (!liveBox) return;
@@ -460,12 +617,22 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
     input.dataset.node = "tower/input"; // RULE 8
     input.addEventListener("input", () => renderPalette()); // 타이핑 = 라이브 검색(이벤트-우선)
     input.addEventListener("keydown", (e) => {
-      // Enter = M4 executor 진입점 stub — 지금은 아무 파괴 동작도 하지 않는다(채움/검색만 유지).
-      if (e.key === "Enter") e.preventDefault();
+      // Enter = executor 진입점(M5) — fast-path EXACT 매치면 즉답, 아니면 slow-path dry-run. 실행은 모두
+      //   executor 단일 실행점 경유(danger 게이트 포함). slow-path 는 dry-run 우선이라 여기서 직접 디스패치 0.
+      if (e.key === "Enter" && !(e as any).isComposing) {
+        e.preventDefault();
+        void submitNL();
+      }
     });
     nlInput = input;
     inwrap.append(inmk, input, elText("span", "⏎", "tower-enter"));
     main.appendChild(inwrap);
+
+    // dry-run plan 미리보기 슬롯 — slow-path 가 검증한 plan 을 여기 행으로(실행 전). NL 바 바로 아래.
+    const plan = el("div", "");
+    plan.dataset.node = "tower/plan"; // RULE 8 — plan 미리보기 영역 노출(비어 있어도 주소 존재)
+    planBox = plan;
+    main.appendChild(plan);
 
     // 예시행 섹션 — 클릭 = NL 바 채움(실행 X).
     main.appendChild(elText("div", tr("towerExamplesTitle"), "tower-sec"));
@@ -534,6 +701,13 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
 
   const api: TowerModal = {
     isOpen: () => ov != null,
+    // 헤드리스 slow-path — executor 단일 실행점 직통(모달 open 비의존). dry-run 반환(실행 0), commit() 별도.
+    planAndRun: (nl: string, opts?: PlanRunOptions) => executor.planAndRun(nl, opts),
+    // 결정적 시각 E2E — 모달을 열고 KNOWN plan 을 dry-run preview 로 렌더(라이브 LLM 우회). 실행 0.
+    previewInject: async (nl: string, steps: PlanStep[]) => {
+      if (!ov) api.open();
+      return runSlowPath(nl, { injectPlan: steps });
+    },
     open: () => {
       if (ov) return;
       ov = build();
@@ -561,8 +735,9 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       confirmOv = null;
       ov.remove();
       ov = null;
-      palWrap = liveBox = null;
+      palWrap = liveBox = planBox = null;
       nlInput = null;
+      planning = false;
       catalog = [];
       liveActive = null;
       emit();
@@ -584,8 +759,9 @@ export function createTowerModal(deps: TowerModalDeps): TowerModal {
       confirmOv = null;
       ov?.remove();
       ov = null;
-      palWrap = liveBox = null;
+      palWrap = liveBox = planBox = null;
       nlInput = null;
+      planning = false;
     },
   };
   return api;

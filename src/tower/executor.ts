@@ -14,13 +14,52 @@
 //      {name, params} 를 보관한 게이트 엔트리만이 실행을 구성한다. 토큰 없이는 name/params 출처 자체가
 //      없어 execute 호출을 만들 수 없다 — 검증 분기를 NOP-패치해도 동작 안 함(데이터 의존).
 
-import { classifyDanger, validatePlan, EXAMPLE_COMMANDS, type PlanStep } from "./plan";
+import {
+  classifyDanger,
+  validatePlan,
+  buildPlanSystemPrompt,
+  parsePlan,
+  planContextFromDomain,
+  EXAMPLE_COMMANDS,
+  type PlanStep,
+  type DomainMap,
+} from "./plan";
 
 export interface CommandOutcome {
   ok: boolean;
   code?: string;
   message?: string;
   [k: string]: unknown;
+}
+
+// slow-path planner — 모호 NL 의 planning 턴 단일 seam. systemPrompt(도메인맵 라이브 주입)를 받아
+//   에이전트의 PLAN 텍스트(JSON step 배열, 코드펜스 무방)를 돌려준다. main.ts 가 Clubhouse 엔진
+//   requestPlan 으로 주입하고, 단위 테스트는 고정 PLAN 을 반환하는 stub 을 주입(라이브 LLM 비의존).
+export type Planner = (systemPrompt: string) => Promise<string>;
+
+// step 실행 기록 — 각 step + 그 결과. status step 결과가 보존돼 다음 step·다음 턴 컨텍스트로 흐른다(피드백).
+export interface StepResult {
+  step: PlanStep;
+  result: CommandOutcome;
+}
+
+// commit 결과 — 전체 ok + step별 기록(results). 첫 실패에서 멈추되, 그때까지의 results 는 보존.
+export interface CommitResult extends CommandOutcome {
+  results?: StepResult[];
+}
+
+// dry-run 결과(실행 0). 검증 통과 시 steps + commit() 반환. commit() 호출 시에만 디스패치(사람 ⏎).
+export type PlanRunResult =
+  | { ok: true; steps: PlanStep[]; commit: () => Promise<CommitResult> }
+  | { ok: false; code: string; message: string; steps?: PlanStep[] };
+
+// slow-path 옵션 — planner 미주입 시(deps.planner 도 없으면) NO_PLANNER. hops = 자기교정 상한.
+export interface PlanRunOptions {
+  hops?: number; // self-correct 최대 시도(기본 3) — 미등록/파싱 실패 되먹임 횟수 상한(RULE 폭주 방지).
+  // 결정적 E2E 주입 — planner 를 우회해 KNOWN plan 을 직접 검증→dry-run 한다(라이브 LLM 비의존). 보안
+  //   우회 아님: 주입 plan 도 동일하게 validatePlan(미등록 거부) + dispatchPlan(danger 게이트)을 거친다.
+  //   순수 검증·실행 경로를 라이브 에이전트 없이 단언하기 위한 테스트 hook(노출 command tower.plan 이 사용).
+  injectPlan?: PlanStep[];
 }
 
 // confirm 게이트 — 사람이 수락하면 issue() 로 1회용 토큰을 발급하고 그 토큰을 반환한다.
@@ -37,6 +76,7 @@ export interface ExecutorDeps {
   app: any; // ctx.app — commands.execute 단일 코어 호출 seam.
   confirmGate: ConfirmGate;
   lang?: () => string;
+  planner?: Planner; // slow-path planning 턴 seam(main.ts 가 Clubhouse 엔진으로 주입). 없으면 NO_PLANNER.
 }
 
 // confirm 모달이 노출하는 data-node 경로(소스 단일 진실). 컨테이너만 노출(가시성), accept 는 비노출.
@@ -68,6 +108,8 @@ export interface TowerExecutor {
   runCommand: (name: string, params?: Record<string, unknown>) => Promise<CommandOutcome>;
   runDom: (address: string) => Promise<CommandOutcome>;
   runPlan: (steps: PlanStep[]) => Promise<CommandOutcome>;
+  // slow-path(M5) — 모호 NL → 도메인맵 라이브 주입 planning 턴 → 검증 → dry-run(실행 0) + commit().
+  planAndRun: (nl: string, opts?: PlanRunOptions) => Promise<PlanRunResult>;
 }
 
 // 게이트의 유일 실행 통로(sealedDispatch) 접근 심볼 — 테스트가 "토큰만으로는 못 뚫는다"를 실증하려면
@@ -125,11 +167,14 @@ export function createExecutor(deps: ExecutorDeps): TowerExecutor {
 
   // dom 디스패치(축2) — 노출 주소를 ui.input.click 으로. 단, 보안-chrome(confirm)은 영구 거부.
   //   (b) 악성 plan 이 confirm accept 주소를 넣어도 여기서 차단 → 자가승인 0.
+  //   ⚠️ ui.input.click 은 코어가 inject 로 분류한다 — 클릭은 입력 주입(임의 UI 조작 가능). 따라서 dom
+  //   디스패치도 danger 게이트(confirm)를 거친다(plan 의 dom step 이 사람 확인 없이 임의 클릭 못 함).
+  //   forbidden-chrome 거부가 먼저(게이트조차 안 띄움), 그다음 inject 게이트. 코어 권한은 commands:inject.
   async function runDom(address: string): Promise<CommandOutcome> {
     if (isForbiddenChrome(address)) {
       return { ok: false, code: "FORBIDDEN_CHROME", message: `보안 chrome 은 클릭 대상이 아님: ${address}` };
     }
-    return exec("ui.input.click", { address });
+    return gatedRun("ui.input.click", { address }, "inject"); // 클릭=inject → confirm 게이트 경유.
   }
 
   // 예시행 실행 — text → command + 라이브 파라미터 해소 → runCommand(게이트 포함).
@@ -148,28 +193,109 @@ export function createExecutor(deps: ExecutorDeps): TowerExecutor {
     return runCommand(spec.command, params);
   }
 
-  // slow-path plan 실행(M5 토대) — 먼저 라이브 카탈로그/ui.tree 로 전수 검증 후 step 별 디스패치.
-  //   M4 범위에선 검증 + 축별 라우팅만(엔진 연동은 M5). danger command step 도 게이트를 거친다.
-  async function runPlan(steps: PlanStep[]): Promise<CommandOutcome> {
-    const [cat, tree] = await Promise.all([exec("state.commands"), exec("ui.tree")]);
-    const commandNames = new Set<string>(
-      (Array.isArray((cat as any)?.commands) ? (cat as any).commands : []).map((c: any) => c.name),
-    );
-    const domAddresses = new Set<string>(
-      (Array.isArray((tree as any)?.nodes) ? (tree as any).nodes : []).map((n: any) => n.address),
-    );
-    const v = validatePlan(steps, { commandNames, domAddresses });
-    if (!v.ok) return { ok: false, code: v.code, message: v.message, index: (v as any).index };
-    for (const s of steps) {
-      let r: CommandOutcome;
-      if (s.axis === "dom") r = await runDom(s.address as string);
-      else r = await runCommand(s.name, s.params ?? {});
-      if (!r.ok) return r; // 첫 실패에서 멈춤(되먹임은 M5).
-    }
-    return { ok: true };
+  // 단일 step 디스패치(축별 라우팅, 단일 진실) — runPlan·planAndRun.commit 공용. danger command 는
+  //   runCommand 가 게이트 경유. dom 은 runDom(보안-chrome 영구 거부). status 는 read 직행(비파괴).
+  async function dispatchStep(s: PlanStep): Promise<CommandOutcome> {
+    if (s.axis === "dom") return runDom(s.address as string);
+    if (s.axis === "status") return exec(s.name, s.params ?? {}); // 축3 — read, 게이트 없음.
+    return runCommand(s.name, s.params ?? {}); // 축1 — 비파괴 직행 / danger 게이트.
   }
 
-  const api: TowerExecutor = { runExample, runCommand, runDom, runPlan };
+  // 라이브 3축 도메인맵 캡처 — 호출 직전 스냅샷(축1 state.commands · 축2 ui.tree · 축3 status.query).
+  //   slow-path 가 이걸로 시스템 프롬프트를 주입하고, 같은 스냅샷으로 validatePlan(단일 진실).
+  async function fetchDomainMap(): Promise<DomainMap> {
+    const [cat, tree, st] = await Promise.all([
+      exec("state.commands"),
+      exec("ui.tree"),
+      exec("status.query").catch(() => ({ statuses: [] })),
+    ]);
+    return {
+      commands: (Array.isArray((cat as any)?.commands) ? (cat as any).commands : []).map((c: any) => ({
+        name: c.name,
+        description: c.description,
+      })),
+      addresses: (Array.isArray((tree as any)?.nodes) ? (tree as any).nodes : []).map((n: any) => n.address),
+      statuses: Array.isArray((st as any)?.statuses) ? (st as any).statuses : [],
+    };
+  }
+
+  // plan 디스패치(step별, 첫 실패에서 멈춤) — 각 step 결과를 results 에 기록(피드백). status step 결과는
+  //   보존돼 다음 step·다음 턴 컨텍스트로 흐른다(verify, not poll). danger step 은 confirm 게이트 경유.
+  async function dispatchPlan(steps: PlanStep[]): Promise<CommitResult> {
+    const results: StepResult[] = [];
+    for (const s of steps) {
+      const r = await dispatchStep(s);
+      results.push({ step: s, result: r });
+      if (!r.ok) return { ok: false, code: r.code, message: r.message, results };
+    }
+    return { ok: true, results };
+  }
+
+  // slow-path plan 실행(직접 step 주입 경로) — 라이브 도메인맵으로 전수 검증 후 step별 디스패치.
+  //   fast-path/직접 plan 용(검증 + 실행). 모호 NL 의 dry-run 경로는 planAndRun.
+  async function runPlan(steps: PlanStep[]): Promise<CommandOutcome> {
+    const map = await fetchDomainMap();
+    const v = validatePlan(steps, planContextFromDomain(map));
+    if (!v.ok) return { ok: false, code: v.code, message: v.message, index: (v as any).index };
+    return dispatchPlan(steps);
+  }
+
+  // slow-path 오케스트레이션(M5) — 모호 NL → 도메인맵 라이브 주입 planning 턴 → 파싱 → 검증.
+  //   검증 실패(미등록 command/주소·파싱 실패)는 에러를 다음 planning 프롬프트에 되먹여 self-correct
+  //   (hops 상한, RULE 폭주 방지). 성공 시 **실행하지 않고** dry-run(steps + commit) 반환 — 사람이
+  //   ⏎(commit) 해야 비로소 dispatchPlan 으로 디스패치(안전모델: slow-path 는 항상 dry-run 우선).
+  async function planAndRun(nl: string, opts: PlanRunOptions = {}): Promise<PlanRunResult> {
+    // 결정적 주입(E2E) — KNOWN plan 을 planner 우회로 검증→dry-run. 라이브 도메인맵으로 검증은 동일.
+    if (opts.injectPlan) {
+      const map = await fetchDomainMap();
+      const v = validatePlan(opts.injectPlan, planContextFromDomain(map));
+      if (!v.ok) return { ok: false, code: v.code, message: v.message, steps: opts.injectPlan };
+      const frozen = opts.injectPlan;
+      return { ok: true, steps: frozen, commit: () => dispatchPlan(frozen) };
+    }
+    if (!deps.planner) {
+      return { ok: false, code: "NO_PLANNER", message: "planning 엔진이 연결되지 않음(에이전트 미연결)" };
+    }
+    const planner = deps.planner;
+    const maxHops = Math.max(1, opts.hops ?? 3);
+    let correction: string | undefined;
+    let lastErr: { code: string; message: string; steps?: PlanStep[] } = {
+      code: "PLAN_PARSE_FAILED",
+      message: "PLAN 을 만들지 못했습니다.",
+    };
+    for (let hop = 0; hop < maxHops; hop++) {
+      // 매 hop 라이브 도메인맵 재캡처 — 직전 step 이 화면을 바꿨을 수 있으므로 항상 최신(이벤트-우선 verify).
+      const map = await fetchDomainMap();
+      const prompt = buildPlanSystemPrompt(nl, map, correction);
+      let raw: string;
+      try {
+        raw = await planner(prompt);
+      } catch (e) {
+        lastErr = { code: "PLANNER_FAILED", message: String((e as Error)?.message ?? e) };
+        correction = `플래너 호출 실패: ${lastErr.message}`;
+        continue;
+      }
+      const steps = parsePlan(raw);
+      if (!steps) {
+        lastErr = { code: "PLAN_PARSE_FAILED", message: "PLAN(JSON 배열)을 파싱하지 못했습니다." };
+        correction = "직전 출력에서 JSON 배열 PLAN 을 찾지 못했습니다. 설명 없이 JSON 배열만 출력하세요.";
+        continue;
+      }
+      const v = validatePlan(steps, planContextFromDomain(map));
+      if (!v.ok) {
+        lastErr = { code: v.code, message: v.message, steps };
+        // 되먹임 — 거부된 step 의 사유(미등록 이름/주소)를 다음 프롬프트에 그대로 싣는다(self-correct).
+        correction = `step #${(v as any).index} 거부: ${v.message}`;
+        continue;
+      }
+      // 검증 통과 — dry-run(실행 0) + commit 클로저. commit 시에만 dispatchPlan(사람 ⏎).
+      const frozen = steps;
+      return { ok: true, steps: frozen, commit: () => dispatchPlan(frozen) };
+    }
+    return { ok: false, ...lastErr };
+  }
+
+  const api: TowerExecutor = { runExample, runCommand, runDom, runPlan, planAndRun };
   // 적대 테스트 전용 봉인 통로 — gatedRun 분기를 우회해 토큰만으로 sealedDispatch 를 직접 호출(NOP 공격
   //   동형). 데이터 의존이라 위조/소비 토큰 → 게이트 엔트리 부재 → 0 실행을 단언한다(검증을 지워도 막힘).
   Object.defineProperty(api, SEALED, { value: sealedDispatch, enumerable: false });

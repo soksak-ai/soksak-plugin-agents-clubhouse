@@ -16,6 +16,7 @@
     "ui",
     "ui:titlebar",
     "commands",
+    "commands:inject",
     "programs",
     "fs:read"
   ],
@@ -118,6 +119,13 @@
         "title": {
           "en": "Converse (multi-agent, headless)",
           "ko": "다중 에이전트 1교환(턴테이킹, 헤드리스 E2E)"
+        }
+      },
+      {
+        "name": "tower.plan",
+        "title": {
+          "en": "Tower Plan (slow-path, headless)",
+          "ko": "컨트롤 타워 계획(slow-path NL→3축 plan, dry-run/commit)"
         }
       }
     ],

@@ -158,6 +158,34 @@ const strings = {
     en: "Command failed.",
     ko: "명령 실패.",
   },
+  towerPlanning: {
+    en: "Planning…",
+    ko: "계획 세우는 중…",
+  },
+  towerPlanTitle: {
+    en: "Plan preview — press ⏎ to run",
+    ko: "계획 미리보기 — ⏎ 누르면 실행",
+  },
+  towerPlanRunAll: {
+    en: "Run plan",
+    ko: "계획 실행",
+  },
+  towerPlanDiscard: {
+    en: "Discard",
+    ko: "버리기",
+  },
+  towerPlanFailed: {
+    en: "Could not build a runnable plan.",
+    ko: "실행 가능한 계획을 만들지 못했습니다.",
+  },
+  towerPlanNoAgent: {
+    en: "No agent connected — open a Clubhouse view first.",
+    ko: "연결된 에이전트가 없습니다 — Clubhouse 뷰를 먼저 여세요.",
+  },
+  towerPlanDone: {
+    en: "Plan executed.",
+    ko: "계획 실행 완료.",
+  },
 } as const;
 
 export type I18nKey = keyof typeof strings;

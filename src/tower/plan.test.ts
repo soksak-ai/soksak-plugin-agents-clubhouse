@@ -8,9 +8,13 @@ import { describe, expect, it } from "vitest";
 import {
   validatePlan,
   classifyDanger,
+  buildPlanSystemPrompt,
+  parsePlan,
+  planContextFromDomain,
   EXAMPLE_COMMANDS,
   type PlanStep,
   type PlanContext,
+  type DomainMap,
 } from "./plan";
 
 // 라이브 카탈로그/ui.tree 를 흉내내는 검증 컨텍스트.
@@ -105,6 +109,88 @@ describe("classifyDanger — 코어 레지스트리 danger 미러 (단일 진실
     expect(classifyDanger("panel.equalize")).toBeUndefined();
     expect(classifyDanger("state.commands")).toBeUndefined();
     expect(classifyDanger("panel.list")).toBeUndefined();
+  });
+});
+
+// ── M5 도메인맵 주입 + plan 파싱(순수) ──
+
+const DOMAIN: DomainMap = {
+  commands: [
+    { name: "panel.close", description: "패널 닫기 | 트리거…" },
+    { name: "theme.apply", description: "테마 적용 | 트리거…" },
+    { name: "status.query", description: "상태 조회" },
+  ],
+  addresses: ["win/main/chrome/tower/input", "win/main/proj/x/content/pane/0"],
+  statuses: [{ viewId: "v9", code: "dirty", message: "미저장" }],
+};
+
+describe("buildPlanSystemPrompt — 도메인맵 라이브 주입", () => {
+  it("축1 command 이름, 축2 주소, 축3 상태를 전부 프롬프트에 싣는다(전수 노출)", () => {
+    const p = buildPlanSystemPrompt("패널 닫고 어둡게", DOMAIN);
+    expect(p).toContain("패널 닫고 어둡게"); // 사용자 NL
+    expect(p).toContain("panel.close"); // 축1
+    expect(p).toContain("theme.apply");
+    expect(p).toContain("win/main/chrome/tower/input"); // 축2
+    expect(p).toContain("v9"); // 축3
+    expect(p).toContain("dirty");
+  });
+
+  it("description 의 ' | ' 뒤 트리거 합성본은 잘라 base 만 싣는다", () => {
+    const p = buildPlanSystemPrompt("x", DOMAIN);
+    expect(p).toContain("패널 닫기");
+    expect(p).not.toContain("패널 닫기 | 트리거"); // 합성 트리거어는 프롬프트에 안 들어감
+  });
+
+  it("correction 이 있으면 직전 거부 사유를 self-correct 블록으로 덧붙인다", () => {
+    const p = buildPlanSystemPrompt("x", DOMAIN, "step #0 거부: 미등록 command: nope.evil");
+    expect(p).toContain("거부");
+    expect(p).toContain("nope.evil");
+  });
+
+  it("주소/상태가 비면 '(없음)' 으로 표기(빈 칸 노출, 가짜 주소 0)", () => {
+    const empty: DomainMap = { commands: [], addresses: [], statuses: [] };
+    const p = buildPlanSystemPrompt("x", empty);
+    expect(p).toContain("(없음)");
+  });
+});
+
+describe("parsePlan — LLM 출력 내성(코드펜스/산문)", () => {
+  it("순수 JSON 배열을 파싱한다", () => {
+    const r = parsePlan('[{"axis":"command","name":"theme.apply"}]');
+    expect(r).toEqual([{ axis: "command", name: "theme.apply" }]);
+  });
+
+  it("```json 펜스로 감싼 배열을 파싱한다", () => {
+    const r = parsePlan('PLAN:\n```json\n[{"axis":"command","name":"panel.close"}]\n```\n끝');
+    expect(r?.[0]).toMatchObject({ name: "panel.close" });
+  });
+
+  it("산문에 섞인 첫 균형 배열을 추출한다(중첩 [] 안전)", () => {
+    const r = parsePlan('이렇게요: [{"axis":"command","name":"x","params":{"arr":[1,2]}}] 입니다.');
+    expect(r?.[0]).toMatchObject({ name: "x" });
+  });
+
+  it("배열이 아니면(객체 단독) null", () => {
+    expect(parsePlan('{"axis":"command","name":"x"}')).toBeNull();
+  });
+
+  it("JSON 이 전혀 없으면 null", () => {
+    expect(parsePlan("미안하지만 못 하겠어요.")).toBeNull();
+  });
+});
+
+describe("planContextFromDomain — 도메인맵 → 검증 컨텍스트(단일 진실)", () => {
+  it("command 이름 집합·주소 집합을 그대로 옮긴다", () => {
+    const ctx2 = planContextFromDomain(DOMAIN);
+    expect(ctx2.commandNames.has("panel.close")).toBe(true);
+    expect(ctx2.commandNames.has("nope")).toBe(false);
+    expect(ctx2.domAddresses.has("win/main/chrome/tower/input")).toBe(true);
+  });
+
+  it("도메인맵으로 만든 컨텍스트가 validatePlan 과 일관(같은 진실)", () => {
+    const ctx2 = planContextFromDomain(DOMAIN);
+    expect(validatePlan([{ axis: "command", name: "theme.apply" }], ctx2).ok).toBe(true);
+    expect(validatePlan([{ axis: "command", name: "ghost.cmd" }], ctx2).ok).toBe(false);
   });
 });
 

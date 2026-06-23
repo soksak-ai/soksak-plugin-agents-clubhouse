@@ -20,6 +20,16 @@ function createEngine(app) {
     if (!r.ok) throw new Error(r.error || r.message || "prompt \uC2E4\uD328");
     return { text: r.text ?? "", updates: r.updates ?? [], stopReason: r.stopReason };
   }
+  async function requestPlan(launch, systemPrompt, cwd) {
+    let conn = null;
+    try {
+      conn = await connect(launch, cwd, "deny");
+      const r = await ask(conn.connId, conn.sessionId, systemPrompt);
+      return r.text ?? "";
+    } finally {
+      if (conn) await disconnect(conn.connId);
+    }
+  }
   async function cancel(connId, sessionId) {
     await core("cancel", { connId, sessionId }).catch(() => {
     });
@@ -43,7 +53,7 @@ function createEngine(app) {
     for (const [name, mt] of after) if (!before.has(name) || before.get(name) !== mt) out.push(name);
     return out.sort();
   }
-  return { connect, newSession, ask, cancel, disconnect, snapshot, diffWritten };
+  return { connect, newSession, ask, requestPlan, cancel, disconnect, snapshot, diffWritten };
 }
 
 // src/i18n.ts
@@ -203,6 +213,34 @@ var strings = {
   towerRunFailed: {
     en: "Command failed.",
     ko: "\uBA85\uB839 \uC2E4\uD328."
+  },
+  towerPlanning: {
+    en: "Planning\u2026",
+    ko: "\uACC4\uD68D \uC138\uC6B0\uB294 \uC911\u2026"
+  },
+  towerPlanTitle: {
+    en: "Plan preview \u2014 press \u23CE to run",
+    ko: "\uACC4\uD68D \uBBF8\uB9AC\uBCF4\uAE30 \u2014 \u23CE \uB204\uB974\uBA74 \uC2E4\uD589"
+  },
+  towerPlanRunAll: {
+    en: "Run plan",
+    ko: "\uACC4\uD68D \uC2E4\uD589"
+  },
+  towerPlanDiscard: {
+    en: "Discard",
+    ko: "\uBC84\uB9AC\uAE30"
+  },
+  towerPlanFailed: {
+    en: "Could not build a runnable plan.",
+    ko: "\uC2E4\uD589 \uAC00\uB2A5\uD55C \uACC4\uD68D\uC744 \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
+  },
+  towerPlanNoAgent: {
+    en: "No agent connected \u2014 open a Clubhouse view first.",
+    ko: "\uC5F0\uACB0\uB41C \uC5D0\uC774\uC804\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4 \u2014 Clubhouse \uBDF0\uB97C \uBA3C\uC800 \uC5EC\uC138\uC694."
+  },
+  towerPlanDone: {
+    en: "Plan executed.",
+    ko: "\uACC4\uD68D \uC2E4\uD589 \uC644\uB8CC."
   }
 };
 function t(key, lang) {
@@ -290,6 +328,86 @@ function validatePlan(steps, ctx) {
     }
   }
   return { ok: true };
+}
+function planContextFromDomain(map) {
+  return {
+    commandNames: new Set(map.commands.map((c) => c.name)),
+    domAddresses: new Set(map.addresses)
+  };
+}
+function buildPlanSystemPrompt(nl, map, correction) {
+  const cmds = map.commands.map((c) => {
+    const base = (c.description || "").split(" | ")[0].trim();
+    return base ? `  - ${c.name} \u2014 ${base}` : `  - ${c.name}`;
+  }).join("\n");
+  const addrs = map.addresses.length ? map.addresses.map((a) => `  - ${a}`).join("\n") : "  (\uC5C6\uC74C)";
+  const stats = map.statuses.length ? map.statuses.map((s) => `  - ${s.viewId}: ${s.code}${s.message ? ` (${s.message})` : ""}`).join("\n") : "  (\uC5C6\uC74C)";
+  const correctionBlock = correction ? `
+
+[\uC9C1\uC804 PLAN \uC774 \uAC70\uBD80\uB418\uC5C8\uC2B5\uB2C8\uB2E4]
+${correction}
+\uC704 \uB3C4\uBA54\uC778\uB9F5\uC5D0 \uC2E4\uC81C\uB85C \uC788\uB294 command/\uC8FC\uC18C\uB9CC \uC4F0\uC138\uC694. \uCD94\uCE21 \uAE08\uC9C0.` : "";
+  return `\uB2F9\uC2E0\uC740 soksak \uCEE8\uD2B8\uB864 \uD0C0\uC6CC\uC758 \uD50C\uB798\uB108\uC785\uB2C8\uB2E4. \uC0AC\uC6A9\uC790\uC758 \uC790\uC5F0\uC5B4 \uC694\uCCAD\uC744 \uC544\uB798 3\uCD95 \uB3C4\uBA54\uC778\uB9F5 \uC548\uC5D0\uC11C\uB9CC \uC2E4\uD589 \uAC00\uB2A5\uD55C PLAN \uC73C\uB85C \uBCC0\uD658\uD558\uC138\uC694.
+
+[\uC0AC\uC6A9\uC790 \uC694\uCCAD]
+${nl}
+
+[\uCD951 \u2014 \uC0AC\uC6A9 \uAC00\uB2A5\uD55C command (\uC774 \uC774\uB984\uB4E4\uB9CC \uD5C8\uC6A9)]
+${cmds}
+
+[\uCD952 \u2014 \uD604\uC7AC \uD654\uBA74\uC758 \uC870\uC791 \uAC00\uB2A5\uD55C \uC8FC\uC18C (dom \uCD95 ui.input.click/fill \uB300\uC0C1, \uC774 \uC8FC\uC18C\uB4E4\uB9CC \uD5C8\uC6A9)]
+${addrs}
+
+[\uCD953 \u2014 \uAC01 \uBDF0\uAC00 \uBCF4\uACE0\uD55C \uD604\uC7AC \uC0C1\uD0DC (\uD30C\uAD34\uC801 step \uC804\uC5D0 \uD655\uC778)]
+${stats}
+
+[PLAN \uD615\uC2DD \u2014 \uBC18\uB4DC\uC2DC JSON \uBC30\uC5F4 \uD558\uB098\uB9CC]
+\uAC01 step = {"axis":"command"|"dom"|"status", "name":"<command \uC774\uB984>", "params":{...}} \uB610\uB294 dom \uC740 {"axis":"dom","name":"ui.input.click","address":"<\uCD952 \uC8FC\uC18C>"}.
+- command/status \uB294 \uCD951 \uC774\uB984\uB9CC. dom \uC740 name \uC744 ui.input.click/ui.input.fill \uB85C \uB450\uACE0 address \uB294 \uCD952 \uC8FC\uC18C\uB9CC.
+- \uD30C\uAD34\uC801(\uB2EB\uAE30/\uC81C\uAC70) command \uC55E\uC5D4 status step \uC73C\uB85C \uC548\uC804\uC744 \uBA3C\uC800 \uD655\uC778\uD558\uC138\uC694.
+- \uC124\uBA85\xB7\uC778\uC0AC\xB7\uCF54\uB4DC \uC124\uBA85 \uC5C6\uC774 PLAN(JSON \uBC30\uC5F4)\uB9CC \uCD9C\uB825\uD558\uC138\uC694. \uCF54\uB4DC\uD39C\uC2A4\uB85C \uAC10\uC2F8\uB3C4 \uB429\uB2C8\uB2E4.` + correctionBlock;
+}
+function parsePlan(text) {
+  if (typeof text !== "string") return null;
+  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  const candidates = [];
+  if (fence) candidates.push(fence[1]);
+  const bal = extractBalancedArray(text);
+  if (bal) candidates.push(bal);
+  candidates.push(text);
+  for (const c of candidates) {
+    const s = c.trim();
+    if (!s) continue;
+    try {
+      const v = JSON.parse(s);
+      if (Array.isArray(v)) return v;
+    } catch {
+    }
+  }
+  return null;
+}
+function extractBalancedArray(text) {
+  const start = text.indexOf("[");
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 var EXAMPLE_COMMANDS = [
   {
@@ -418,7 +536,7 @@ function createExecutor(deps) {
     if (isForbiddenChrome(address)) {
       return { ok: false, code: "FORBIDDEN_CHROME", message: `\uBCF4\uC548 chrome \uC740 \uD074\uB9AD \uB300\uC0C1\uC774 \uC544\uB2D8: ${address}` };
     }
-    return exec("ui.input.click", { address });
+    return gatedRun("ui.input.click", { address }, "inject");
   }
   async function runExample(index) {
     const spec = EXAMPLE_COMMANDS[index];
@@ -434,38 +552,95 @@ function createExecutor(deps) {
     }
     return runCommand(spec.command, params);
   }
-  async function runPlan(steps) {
-    const [cat, tree] = await Promise.all([exec("state.commands"), exec("ui.tree")]);
-    const commandNames = new Set(
-      (Array.isArray(cat?.commands) ? cat.commands : []).map((c) => c.name)
-    );
-    const domAddresses = new Set(
-      (Array.isArray(tree?.nodes) ? tree.nodes : []).map((n) => n.address)
-    );
-    const v = validatePlan(steps, { commandNames, domAddresses });
-    if (!v.ok) return { ok: false, code: v.code, message: v.message, index: v.index };
-    for (const s of steps) {
-      let r;
-      if (s.axis === "dom") r = await runDom(s.address);
-      else r = await runCommand(s.name, s.params ?? {});
-      if (!r.ok) return r;
-    }
-    return { ok: true };
+  async function dispatchStep(s) {
+    if (s.axis === "dom") return runDom(s.address);
+    if (s.axis === "status") return exec(s.name, s.params ?? {});
+    return runCommand(s.name, s.params ?? {});
   }
-  const api = { runExample, runCommand, runDom, runPlan };
+  async function fetchDomainMap() {
+    const [cat, tree, st] = await Promise.all([
+      exec("state.commands"),
+      exec("ui.tree"),
+      exec("status.query").catch(() => ({ statuses: [] }))
+    ]);
+    return {
+      commands: (Array.isArray(cat?.commands) ? cat.commands : []).map((c) => ({
+        name: c.name,
+        description: c.description
+      })),
+      addresses: (Array.isArray(tree?.nodes) ? tree.nodes : []).map((n) => n.address),
+      statuses: Array.isArray(st?.statuses) ? st.statuses : []
+    };
+  }
+  async function dispatchPlan(steps) {
+    const results = [];
+    for (const s of steps) {
+      const r = await dispatchStep(s);
+      results.push({ step: s, result: r });
+      if (!r.ok) return { ok: false, code: r.code, message: r.message, results };
+    }
+    return { ok: true, results };
+  }
+  async function runPlan(steps) {
+    const map = await fetchDomainMap();
+    const v = validatePlan(steps, planContextFromDomain(map));
+    if (!v.ok) return { ok: false, code: v.code, message: v.message, index: v.index };
+    return dispatchPlan(steps);
+  }
+  async function planAndRun(nl, opts = {}) {
+    if (opts.injectPlan) {
+      const map = await fetchDomainMap();
+      const v = validatePlan(opts.injectPlan, planContextFromDomain(map));
+      if (!v.ok) return { ok: false, code: v.code, message: v.message, steps: opts.injectPlan };
+      const frozen = opts.injectPlan;
+      return { ok: true, steps: frozen, commit: () => dispatchPlan(frozen) };
+    }
+    if (!deps.planner) {
+      return { ok: false, code: "NO_PLANNER", message: "planning \uC5D4\uC9C4\uC774 \uC5F0\uACB0\uB418\uC9C0 \uC54A\uC74C(\uC5D0\uC774\uC804\uD2B8 \uBBF8\uC5F0\uACB0)" };
+    }
+    const planner = deps.planner;
+    const maxHops = Math.max(1, opts.hops ?? 3);
+    let correction;
+    let lastErr = {
+      code: "PLAN_PARSE_FAILED",
+      message: "PLAN \uC744 \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
+    };
+    for (let hop = 0; hop < maxHops; hop++) {
+      const map = await fetchDomainMap();
+      const prompt = buildPlanSystemPrompt(nl, map, correction);
+      let raw;
+      try {
+        raw = await planner(prompt);
+      } catch (e) {
+        lastErr = { code: "PLANNER_FAILED", message: String(e?.message ?? e) };
+        correction = `\uD50C\uB798\uB108 \uD638\uCD9C \uC2E4\uD328: ${lastErr.message}`;
+        continue;
+      }
+      const steps = parsePlan(raw);
+      if (!steps) {
+        lastErr = { code: "PLAN_PARSE_FAILED", message: "PLAN(JSON \uBC30\uC5F4)\uC744 \uD30C\uC2F1\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4." };
+        correction = "\uC9C1\uC804 \uCD9C\uB825\uC5D0\uC11C JSON \uBC30\uC5F4 PLAN \uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC124\uBA85 \uC5C6\uC774 JSON \uBC30\uC5F4\uB9CC \uCD9C\uB825\uD558\uC138\uC694.";
+        continue;
+      }
+      const v = validatePlan(steps, planContextFromDomain(map));
+      if (!v.ok) {
+        lastErr = { code: v.code, message: v.message, steps };
+        correction = `step #${v.index} \uAC70\uBD80: ${v.message}`;
+        continue;
+      }
+      const frozen = steps;
+      return { ok: true, steps: frozen, commit: () => dispatchPlan(frozen) };
+    }
+    return { ok: false, ...lastErr };
+  }
+  const api = { runExample, runCommand, runDom, runPlan, planAndRun };
   Object.defineProperty(api, SEALED, { value: sealedDispatch, enumerable: false });
   return api;
 }
 
 // src/tower/modal.ts
 var TOWER_LIVE_TOPIC = "clubhouse.tower.live";
-var EXAMPLES = [
-  "\uC5D0\uB514\uD130 \uD328\uB110 \uB2EB\uC544\uC918",
-  "\uD130\uBBF8\uB110 \uD328\uB110 \uB2EB\uC544\uC918",
-  "\uBD84\uD560 \uBC18\uBC18\uC73C\uB85C \uB9DE\uCDB0\uC918",
-  "\uB2E4\uD06C \uBAA8\uB4DC\uB85C \uBC14\uAFD4\uC918",
-  "\uB2E4\uC74C \uD14C\uB9C8\uB85C \uBC14\uAFD4\uC918"
-];
+var EXAMPLES = EXAMPLE_COMMANDS.map((e) => e.text);
 var STYLE_ID = "tower-modal-style";
 var CSS = `
 .tower-ov{position:fixed;left:50%;top:76px;transform:translateX(-50%);width:560px;max-width:calc(100vw - 32px);
@@ -506,6 +681,28 @@ var CSS = `
 .tower-ex-mk{color:var(--acc,#7aa2f7);flex:0 0 auto;font-size:12px}
 .tower-ex-tx{flex:1 1 auto;min-width:0}
 .tower-ex-go{flex:0 0 auto;font-size:11px;color:var(--fg3,#888)}
+/* dry-run plan \uBBF8\uB9AC\uBCF4\uAE30 \u2014 \uC608\uC2DC\uD589 \uB8E9 \uC7AC\uC0AC\uC6A9(\uC2E4\uD589 \uC804 plan step \uD45C\uC2DC, \u23CE \uB85C commit) */
+.tower-plan{display:flex;flex-direction:column;gap:6px;border:1px solid var(--acc,#7aa2f7);border-radius:9px;
+  padding:9px;background:var(--accbg,rgba(122,162,247,.08))}
+.tower-plan-hd{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--acc,#7aa2f7)}
+.tower-plan-hd .sp{flex:1 1 auto}
+.tower-plan-steps{display:flex;flex-direction:column;gap:4px}
+.tower-pstep{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:7px;border:1px solid var(--bd,#3a3a3a);
+  background:var(--inset,rgba(127,127,127,.06))}
+.tower-pstep-ax{flex:0 0 auto;font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+  color:var(--fg3,#888);border:1px solid var(--bd,#3a3a3a);border-radius:5px;padding:0 5px;line-height:15px}
+.tower-pstep-tx{flex:1 1 auto;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tower-pstep-dg{flex:0 0 auto;color:var(--danger-soft,#d77);font-size:11px}
+.tower-pstep-go{flex:0 0 auto;font-size:11px;color:var(--fg3,#888)}
+.tower-plan-act{display:flex;justify-content:flex-end;gap:7px;margin-top:2px}
+.tower-plan-btn{appearance:none;border:1px solid var(--bd,#3a3a3a);background:transparent;color:inherit;font:inherit;
+  font-size:11.5px;cursor:pointer;border-radius:7px;padding:4px 11px}
+.tower-plan-btn:hover{background:var(--inset,rgba(127,127,127,.14))}
+.tower-plan-btn.run{border-color:var(--acc,#7aa2f7);color:var(--acc,#7aa2f7);font-weight:600}
+.tower-plan-btn.run:hover{background:var(--accbg,rgba(122,162,247,.18))}
+.tower-plan-busy{font-size:11.5px;color:var(--fg3,#888);padding:4px 2px}
 /* \uD314\uB808\uD2B8 */
 .tower-pal{display:flex;flex-direction:column;gap:2px;max-height:208px;overflow-y:auto}
 .tower-cmd{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:7px;cursor:pointer;
@@ -646,6 +843,8 @@ function createTowerModal(deps) {
   let palWrap = null;
   let liveBox = null;
   let nlInput = null;
+  let planBox = null;
+  let planning = false;
   let catalog = [];
   let liveActive = null;
   const tr = (key) => t(key, lang());
@@ -700,7 +899,7 @@ function createTowerModal(deps) {
     window.addEventListener("keydown", onKey, true);
     ok.focus();
   });
-  const executor = createExecutor({ app, confirmGate, lang });
+  const executor = createExecutor({ app, confirmGate, lang, planner: deps.planner });
   function reportOutcome(label, r) {
     let key = "towerRunOk";
     if (!r.ok) key = r.code === "NEEDS_TARGET" ? "towerRunNeedsTarget" : r.code === "CONFIRM_DENIED" ? "towerRunDenied" : "towerRunFailed";
@@ -751,6 +950,112 @@ function createTowerModal(deps) {
       });
       wrap.appendChild(row);
     }
+  }
+  async function submitNL() {
+    const raw = (nlInput?.value ?? "").trim();
+    if (!raw || planning) return;
+    const exIdx = EXAMPLE_COMMANDS.findIndex((e) => e.text === raw);
+    if (exIdx >= 0) {
+      if (nlInput) nlInput.value = "";
+      clearPlanPreview();
+      renderPalette();
+      void executor.runExample(exIdx).then((r) => reportOutcome(`"${raw}"`, r));
+      return;
+    }
+    const cmd = catalog.find((c) => c.name === raw);
+    if (cmd) {
+      if (nlInput) nlInput.value = "";
+      clearPlanPreview();
+      renderPalette();
+      void executor.runCommand(cmd.name).then((r) => reportOutcome(cmd.name, r));
+      return;
+    }
+    await runSlowPath(raw);
+  }
+  async function runSlowPath(raw, opts) {
+    planning = true;
+    renderPlanBusy(tr("towerPlanning"));
+    onLive({ kind: "user", who: "\u2726", text: raw });
+    let res;
+    try {
+      res = await executor.planAndRun(raw, opts);
+    } catch (e) {
+      res = { ok: false, code: "PLAN_EXCEPTION", message: String(e?.message ?? e) };
+    }
+    planning = false;
+    if (!res.ok) {
+      const key = res.code === "NO_PLANNER" ? "towerPlanNoAgent" : "towerPlanFailed";
+      renderPlanBusy(tr(key), true);
+      onLive({ kind: "start", who: "\u2726" });
+      onLive({ kind: "end", text: tr(key) });
+      return res;
+    }
+    renderPlanPreview(raw, res.steps, res.commit);
+    return res;
+  }
+  function renderPlanBusy(msg, _error = false) {
+    const box = planBox;
+    if (!box) return;
+    box.replaceChildren(elText("div", msg, "tower-plan-busy"));
+    box.dataset.node = "tower/plan";
+  }
+  function clearPlanPreview() {
+    if (planBox) planBox.replaceChildren();
+  }
+  function renderPlanPreview(nl, steps, commit) {
+    const box = planBox;
+    if (!box) return;
+    box.replaceChildren();
+    const wrap = el("div", "tower-plan");
+    const hd = el("div", "tower-plan-hd");
+    hd.append(elText("span", "\u2726", ""), elText("span", tr("towerPlanTitle"), ""), el("span", "sp"));
+    wrap.appendChild(hd);
+    const stepsBox = el("div", "tower-plan-steps");
+    steps.forEach((s, i) => {
+      const row = el("div", "tower-pstep");
+      row.dataset.node = `tower/plan/step/${i}`;
+      row.append(elText("span", s.axis, "tower-pstep-ax"));
+      const label = s.axis === "dom" ? `${s.name} ${s.address ?? ""}`.trim() : stepLabel(s);
+      const tx = elText("span", label, "tower-pstep-tx");
+      tx.title = label;
+      row.append(tx);
+      if (s.axis !== "dom" && cmdDanger(s.name)) row.append(elText("span", "\u26A0", "tower-pstep-dg"));
+      row.append(elText("span", "\u23CE", "tower-pstep-go"));
+      stepsBox.appendChild(row);
+    });
+    wrap.appendChild(stepsBox);
+    const act = el("div", "tower-plan-act");
+    const discard = el("button", "tower-plan-btn");
+    discard.type = "button";
+    discard.textContent = tr("towerPlanDiscard");
+    discard.dataset.node = "tower/plan/discard";
+    discard.addEventListener("click", () => clearPlanPreview());
+    const run = el("button", "tower-plan-btn run");
+    run.type = "button";
+    run.textContent = `${tr("towerPlanRunAll")} \u23CE`;
+    run.dataset.node = "tower/plan/run";
+    let committing = false;
+    const doCommit = () => {
+      if (committing) return;
+      committing = true;
+      run.disabled = true;
+      void commit().then((r) => {
+        clearPlanPreview();
+        if (nlInput) nlInput.value = "";
+        renderPalette();
+        reportOutcome(`"${nl}"`, r.ok ? { ok: true } : r);
+      });
+    };
+    run.addEventListener("click", doCommit);
+    act.append(discard, run);
+    wrap.appendChild(act);
+    box.appendChild(wrap);
+    box.dataset.node = "tower/plan";
+    run.focus();
+  }
+  function stepLabel(s) {
+    const p = s.params && Object.keys(s.params).length ? ` ${JSON.stringify(s.params)}` : "";
+    return `${s.name}${p}`;
   }
   function clearLive() {
     if (!liveBox) return;
@@ -805,11 +1110,18 @@ function createTowerModal(deps) {
     input.dataset.node = "tower/input";
     input.addEventListener("input", () => renderPalette());
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") e.preventDefault();
+      if (e.key === "Enter" && !e.isComposing) {
+        e.preventDefault();
+        void submitNL();
+      }
     });
     nlInput = input;
     inwrap.append(inmk, input, elText("span", "\u23CE", "tower-enter"));
     main.appendChild(inwrap);
+    const plan = el("div", "");
+    plan.dataset.node = "tower/plan";
+    planBox = plan;
+    main.appendChild(plan);
     main.appendChild(elText("div", tr("towerExamplesTitle"), "tower-sec"));
     const exs = el("div", "tower-exs");
     EXAMPLES.forEach((text, i) => {
@@ -865,6 +1177,13 @@ function createTowerModal(deps) {
   };
   const api = {
     isOpen: () => ov != null,
+    // 헤드리스 slow-path — executor 단일 실행점 직통(모달 open 비의존). dry-run 반환(실행 0), commit() 별도.
+    planAndRun: (nl, opts) => executor.planAndRun(nl, opts),
+    // 결정적 시각 E2E — 모달을 열고 KNOWN plan 을 dry-run preview 로 렌더(라이브 LLM 우회). 실행 0.
+    previewInject: async (nl, steps) => {
+      if (!ov) api.open();
+      return runSlowPath(nl, { injectPlan: steps });
+    },
     open: () => {
       if (ov) return;
       ov = build();
@@ -890,8 +1209,9 @@ function createTowerModal(deps) {
       confirmOv = null;
       ov.remove();
       ov = null;
-      palWrap = liveBox = null;
+      palWrap = liveBox = planBox = null;
       nlInput = null;
+      planning = false;
       catalog = [];
       liveActive = null;
       emit();
@@ -912,8 +1232,9 @@ function createTowerModal(deps) {
       confirmOv = null;
       ov?.remove();
       ov = null;
-      palWrap = liveBox = null;
+      palWrap = liveBox = planBox = null;
       nlInput = null;
+      planning = false;
     }
   };
   return api;
@@ -921,8 +1242,8 @@ function createTowerModal(deps) {
 
 // src/tower/header.ts
 var SPARKLE_ICON = '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .962 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .962L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.962 0z" />';
-function setupTower(app, label, lang) {
-  const modal = createTowerModal({ title: label, lang, app, onChange: () => render() });
+function setupTower(app, label, lang, planner) {
+  const modal = createTowerModal({ title: label, lang, app, planner, onChange: () => render() });
   let unregister = null;
   const render = () => {
     unregister = app.ui.registerHeaderAction({
@@ -938,6 +1259,8 @@ function setupTower(app, label, lang) {
   };
   render();
   return {
+    planAndRun: (nl, opts) => modal.planAndRun(nl, opts),
+    previewInject: (nl, steps) => modal.previewInject(nl, steps),
     dispose: () => {
       unregister?.();
       modal.dispose();
@@ -1174,8 +1497,6 @@ var main_default = {
         lang = e.language;
       })
     );
-    const tower = setupTower(app, t("towerTitle", lang), () => lang);
-    ctx.subscriptions.push({ dispose: () => tower.dispose() });
     const settingPolicy = () => app.settings?.get("permissionPolicy") || void 0;
     const settingMode = () => {
       const v = app.settings?.get("kibitzDefault");
@@ -1185,6 +1506,14 @@ var main_default = {
     const settingFacilMax = () => Math.max(1, Number(app.settings?.get("facilMaxRounds")) || FACIL_MAX_ROUNDS);
     const projectCwd = () => app.project?.current?.()?.root;
     let activeClubhouse = null;
+    const towerPlanner = async (systemPrompt) => {
+      const st = activeClubhouse;
+      const agent = st && (participants(st.roster).includes(st.facilitatorId) ? st.facilitatorId : participants(st.roster)[0]) || "claude";
+      const cwd = st?.cwd ?? projectCwd();
+      return engine.requestPlan({ agent }, systemPrompt, cwd);
+    };
+    const tower = setupTower(app, t("towerTitle", lang), () => lang, towerPlanner);
+    ctx.subscriptions.push({ dispose: () => tower.dispose() });
     ctx.subscriptions.push(
       app.commands.register("send", {
         description: "Inject a human message into the active Clubhouse view, equivalent to typing and submitting via the textarea. Use to drive or interject a multi-agent conversation programmatically (E2E, automation, AI control).",
@@ -1226,6 +1555,40 @@ var main_default = {
             // streamed = 지금까지 받은 message 청크 누적 길이(thought 제외) — >0 이면 '출력 시작'.
             actives: [...st.actives].map((c) => ({ id: c.agentId, streamed: c.liveRaw.length }))
           };
+        }
+      })
+    );
+    ctx.subscriptions.push(
+      app.commands.register("tower.plan", {
+        description: "Drive the control-tower slow-path headlessly: turn an ambiguous natural-language request into a validated 3-axis plan (command/dom/status) via a planning turn with the live domain map injected, then return a dry-run preview (no execution). Pass commit:true to dispatch the validated plan (safe steps run; destructive steps still require the desktop confirm gate). Use for utterance E2E and AI automation of the tower.",
+        triggers: { ko: "\uD0C0\uC6CC \uACC4\uD68D \uC790\uC5F0\uC5B4 \uBA85\uB839 \uBCC0\uD658 plan \uC2AC\uB85C\uC6B0\uD328\uC2A4 dry-run \uCEE8\uD2B8\uB864\uD0C0\uC6CC" },
+        params: {
+          text: { type: "string", required: true, description: 'Natural-language request (e.g. "close the left panel and show the terminal big").' },
+          commit: { type: "boolean", description: "true = dispatch the validated plan after planning (destructive steps still gated). Omit/false = dry-run only (return steps, execute nothing)." },
+          plan: {
+            type: "array",
+            description: "Deterministic E2E injection: a KNOWN plan (array of {axis, name, params|address}) to validate and dry-run instead of calling the live planning agent. Still validated (unknown command/address rejected) and still danger-gated on commit \u2014 no security bypass."
+          },
+          render: {
+            type: "boolean",
+            description: "true = render the dry-run preview in the tower modal UI (opens it if closed) for visual snapshot verification. Requires plan injection."
+          }
+        },
+        handler: async (p) => {
+          const text = String(p?.text ?? "").trim();
+          if (!text) return { ok: false, error: "text \uD544\uC218" };
+          const inject = Array.isArray(p?.plan) ? p.plan : void 0;
+          if (p?.render === true && inject) {
+            const r = await tower.previewInject(text, inject);
+            if (!r.ok) return { ok: false, code: r.code, message: r.message };
+            return { ok: true, dryRun: true, rendered: true, steps: r.steps };
+          }
+          const res = await tower.planAndRun(text, inject ? { injectPlan: inject } : void 0);
+          if (!res.ok) return { ok: false, code: res.code, message: res.message };
+          const steps = res.steps;
+          if (p?.commit !== true) return { ok: true, dryRun: true, steps };
+          const c = await res.commit();
+          return { ok: c.ok, committed: true, code: c.code, steps, results: c.results };
         }
       })
     );

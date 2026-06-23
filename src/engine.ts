@@ -53,6 +53,21 @@ export function createEngine(app: any) {
     return { text: r.text ?? "", updates: r.updates ?? [], stopReason: r.stopReason };
   }
 
+  // 타워 slow-path planning 턴(M5) — 모호 NL 의 PLAN 을 한 에이전트에게서 받아온다. ask 와 같은 일회성
+  //   경로(connect → new session → prompt → disconnect)라 라이브 Clubhouse content 탭의 영속 연결·대화
+  //   상태를 건드리지 않는다(별도 단발 연결). 반환 = 에이전트 raw 텍스트(executor.parsePlan 이 PLAN 추출).
+  //   permission 은 read-only 정책으로 강제 — planning 은 디스크/명령 권한 불필요(plan 만 작성).
+  async function requestPlan(launch: AgentLaunch, systemPrompt: string, cwd?: string): Promise<string> {
+    let conn: Conn | null = null;
+    try {
+      conn = await connect(launch, cwd, "deny"); // planning 턴은 권한 거부(plan 텍스트만 — 부수효과 0)
+      const r = await ask(conn.connId, conn.sessionId, systemPrompt);
+      return r.text ?? "";
+    } finally {
+      if (conn) await disconnect(conn.connId);
+    }
+  }
+
   async function cancel(connId: number, sessionId: string): Promise<void> {
     // 진행 중 턴 중단(사람 참견 시) — 코어가 cancel 을 노출하면 호출, 없으면 무시(상위가 결과 폐기로 처리).
     await core("cancel", { connId, sessionId }).catch(() => {});
@@ -80,7 +95,7 @@ export function createEngine(app: any) {
     return out.sort();
   }
 
-  return { connect, newSession, ask, cancel, disconnect, snapshot, diffWritten };
+  return { connect, newSession, ask, requestPlan, cancel, disconnect, snapshot, diffWritten };
 }
 
 export type Engine = ReturnType<typeof createEngine>;
