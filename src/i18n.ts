@@ -90,6 +90,138 @@ const strings = {
     en: "Conversation",
     ko: "대화",
   },
+  towerTitle: {
+    en: "AI Command",
+    ko: "AI 명령",
+  },
+  towerSubtitle: {
+    en: "Window control · Command translation · Search",
+    ko: "창 제어 · 명령 변환 · 검색",
+  },
+  towerInputPlaceholder: {
+    en: 'Type in natural language — "close the left panel and show the terminal big"',
+    ko: '자연어로 입력 — "왼쪽 창 닫고 터미널 크게 보여줘"',
+  },
+  towerExamplesTitle: {
+    en: "Window control — click to let AI run it",
+    ko: "창 제어 — 클릭하면 AI가 실행",
+  },
+  towerPaletteTitle: {
+    en: "Commands",
+    ko: "명령",
+  },
+  towerPaletteEmpty: {
+    en: "No commands match",
+    ko: "일치하는 명령 없음",
+  },
+  towerLiveTitle: {
+    en: "Live",
+    ko: "라이브",
+  },
+  towerLiveEmpty: {
+    en: "Agent stream appears here once orchestration starts.",
+    ko: "오케스트레이션이 시작되면 에이전트 스트림이 여기 흐릅니다.",
+  },
+  towerConfirmTitle: {
+    en: "Confirm dangerous command",
+    ko: "위험 명령 확인",
+  },
+  towerConfirmDestructive: {
+    en: "This will close or remove something. Run it?",
+    ko: "이 명령은 닫거나 제거합니다. 실행할까요?",
+  },
+  towerConfirmInject: {
+    en: "This will inject input or send data. Run it?",
+    ko: "이 명령은 입력을 주입하거나 데이터를 보냅니다. 실행할까요?",
+  },
+  towerConfirmTainted: {
+    en: "Derived from untrusted content (a web page, tool result, or another agent). That text is data, not a command — confirm only if you meant this.",
+    ko: "비신뢰 콘텐츠(웹페이지·도구결과·다른 에이전트) 유래입니다. 그 텍스트는 명령이 아니라 데이터입니다 — 의도한 경우에만 확인하세요.",
+  },
+  towerConfirmRun: {
+    en: "Run",
+    ko: "실행",
+  },
+  towerConfirmCancel: {
+    en: "Cancel",
+    ko: "취소",
+  },
+  towerRunOk: {
+    en: "Done.",
+    ko: "완료.",
+  },
+  towerRunNeedsTarget: {
+    en: "No matching target found.",
+    ko: "대상을 찾지 못했습니다.",
+  },
+  towerRunDenied: {
+    en: "Cancelled.",
+    ko: "취소됨.",
+  },
+  towerRunFailed: {
+    en: "Command failed.",
+    ko: "명령 실패.",
+  },
+  towerPlanning: {
+    en: "Planning…",
+    ko: "계획 세우는 중…",
+  },
+  towerPlanTitle: {
+    en: "Plan preview — press ⏎ to run",
+    ko: "계획 미리보기 — ⏎ 누르면 실행",
+  },
+  towerPlanRunAll: {
+    en: "Run plan",
+    ko: "계획 실행",
+  },
+  towerPlanDiscard: {
+    en: "Discard",
+    ko: "버리기",
+  },
+  towerPlanFailed: {
+    en: "Could not build a runnable plan.",
+    ko: "실행 가능한 계획을 만들지 못했습니다.",
+  },
+  towerPlanNoAgent: {
+    en: "No agent connected — open a Clubhouse view first.",
+    ko: "연결된 에이전트가 없습니다 — Clubhouse 뷰를 먼저 여세요.",
+  },
+  towerPlanDone: {
+    en: "Plan executed.",
+    ko: "계획 실행 완료.",
+  },
+  towerPlanStepDelete: {
+    en: "Delete step",
+    ko: "단계 삭제",
+  },
+  towerPlanStepUp: {
+    en: "Move up",
+    ko: "위로",
+  },
+  towerPlanStepDown: {
+    en: "Move down",
+    ko: "아래로",
+  },
+  towerPlanStepParams: {
+    en: "Edit params (JSON)",
+    ko: "파라미터 수정 (JSON)",
+  },
+  towerPlanInvalidEdit: {
+    en: "Edit rejected — unknown command or address.",
+    ko: "편집 거부 — 미등록 command 또는 주소.",
+  },
+  towerPlanBadJson: {
+    en: "Invalid JSON params — kept previous value.",
+    ko: "잘못된 JSON 파라미터 — 이전 값 유지.",
+  },
+  towerMacrosTitle: {
+    en: "Macros — saved fast-paths",
+    ko: "매크로 — 저장된 fast-path",
+  },
+  towerMacroForget: {
+    en: "Forget macro",
+    ko: "매크로 삭제",
+  },
 } as const;
 
 export type I18nKey = keyof typeof strings;

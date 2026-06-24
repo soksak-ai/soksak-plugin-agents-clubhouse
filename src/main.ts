@@ -12,6 +12,13 @@
 
 import { createEngine } from "./engine";
 import { t, tp } from "./i18n";
+import { setupTower } from "./tower/header";
+import { TOWER_LIVE_TOPIC, type TowerLiveEvent } from "./tower/modal";
+import { createTrace, type DataApi, type TraceSink, type TracePlan, type TraceStep } from "./tower/trace";
+import { createMacroStore, type MacroSink, type Macro } from "./tower/macro";
+import { deleteStep, moveStep, editParams } from "./tower/editplan";
+import type { PlanStep } from "./tower/plan";
+import type { UntrustedSource } from "./tower/executor";
 import {
   buildPrompt,
   detectMentions,
@@ -40,6 +47,24 @@ const NAME: Record<string, string> = { claude: "Claude", codex: "Codex", gemini:
 const COLOR: Record<string, string> = Object.fromEntries(AGENTS.map((a) => [a.id, a.color]));
 const nameOf = (id: string): string => NAME[id] ?? id;
 const FACIL_MAX_ROUNDS = 6; // 진행 모드 하드 안전판 — 진행자가 안 멈추면 강제 마무리(무한 불가). 설정 override.
+
+// M10 — tower.plan/reflect/scan 의 untrusted 파라미터 정규화. {source,text}[] 또는 plain string[](각 항목을
+//   source="untrusted" 로 래핑) 둘 다 받는다. 비배열/빈 항목은 버린다. 출력이 비면 undefined(=trusted, taint 0).
+function normalizeUntrusted(raw: unknown): UntrustedSource[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: UntrustedSource[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (typeof item === "string") {
+      if (item) out.push({ source: `untrusted#${i}`, text: item });
+    } else if (item && typeof item === "object") {
+      const text = typeof (item as any).text === "string" ? (item as any).text : "";
+      const source = typeof (item as any).source === "string" && (item as any).source ? (item as any).source : `untrusted#${i}`;
+      if (text) out.push({ source, text });
+    }
+  }
+  return out.length ? out : undefined;
+}
 
 const CSS = `
 .st{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg,#1e1e1e);color:var(--fg,#ddd);font:13px system-ui,-apple-system,sans-serif;overflow:hidden}
@@ -141,6 +166,11 @@ export default {
       app.commands.execute("plugin.soksak-plugin-agents-acp." + name, params ?? {});
     const engine = createEngine(app);
 
+    // 라이브 relay — Clubhouse 스트림(단일 진실: onStream/runOneTurn/renderUser)을 stable bus 토픽으로
+    //   재방송한다. 타워 라이브칸이 connId 추측 없이 이 한 토픽만 구독(이벤트-우선, 폴링 0). content 탭 렌더는
+    //   그대로 두고 emit 한 줄만 additive — content 탭과 모달이 같은 오케스트레이션을 동시 반영.
+    const liveEmit = (ev: TowerLiveEvent) => app.bus.emit(TOWER_LIVE_TOPIC, ev);
+
     let lang = app.locale?.() ?? "ko"; // 현재 언어 취득 — 없으면 ko 폴백
     ctx.subscriptions.push(
       app.events.on("locale.changed", (e: { language: string }) => {
@@ -162,6 +192,56 @@ export default {
 
     // 활성(마지막 마운트) Clubhouse 뷰 — send 명령이 라이브 대화를 프로그램적으로 구동(노출 command E2E).
     let activeClubhouse: ClubhouseState | null = null;
+
+    // ── 컨트롤 타워: 타이틀바 ✦ 액션 + AI-명령 모달(M2~M5) ──
+    // content 탭은 그대로 두고 타이틀바에 아이콘 1개를 추가(additive). 클릭 = 모달 토글.
+    // planner = slow-path planning 턴 seam(M5) — engine.requestPlan 으로 단발 연결(ask 동형, 권한 deny)을
+    //   써서 content 탭의 영속 연결·대화 상태를 건드리지 않는다. 진행자(facilitator) 또는 기본 claude 가
+    //   도메인맵 주입 프롬프트를 받아 PLAN 을 작성한다. cwd = 활성 뷰의 cwd(없으면 프로젝트 루트).
+    const towerPlanner = async (systemPrompt: string): Promise<string> => {
+      const st = activeClubhouse;
+      // 진행자 우선 → 체크된 첫 참여자 → 기본 claude(에이전트 미연결이면 requestPlan 이 throw).
+      const agent =
+        (st && (participants(st.roster).includes(st.facilitatorId) ? st.facilitatorId : participants(st.roster)[0])) ||
+        "claude";
+      const cwd = st?.cwd ?? projectCwd();
+      return engine.requestPlan({ agent }, systemPrompt, cwd);
+    };
+    // 다중 에이전트 분배(M6) — 지정 에이전트에게 planning 턴을 보낸다(distribute.ts PlanFor seam). priorContext
+    //   (turn 모드 의존 체인)는 시스템 프롬프트에 덧붙인다. requestPlan 은 단발 연결(권한 deny) — content 탭 무영향.
+    const towerPlanFor = async (agentId: string, systemPrompt: string, priorContext?: string): Promise<string> => {
+      const st = activeClubhouse;
+      const cwd = st?.cwd ?? projectCwd();
+      const prompt = priorContext ? `${systemPrompt}\n\n[앞 에이전트들의 PLAN(의존 맥락)]\n${priorContext}` : systemPrompt;
+      return engine.requestPlan({ agent: agentId }, prompt, cwd);
+    };
+    // ── 세션/trace 영속(M7) — 코어 generic app.data 위에 plan·step·outcome 을 기록(코어 커플링 0, raw SQL 0) ──
+    //   sessionId = 프로젝트 루트(있으면) — 같은 프로젝트의 타워 이력을 한 세션으로 묶고 reload 후에도 동일
+    //   키로 재조회된다(영속). 프로젝트 없으면 "default". app.data 가 ns=pluginId 로 격리한다.
+    //   data 권한 미부여(또는 호스트 미구현) 환경에선 app.data 부재 → trace=undefined(영속 0, 기능 무해 비활성).
+    const traceSessionId = (): string => app.project?.current?.()?.root || "default";
+    const trace: TraceSink | undefined = app.data
+      ? createTrace(app.data as DataApi, { sessionId: traceSessionId() })
+      : undefined;
+    // 명명 매크로 영속(M11) — 같은 app.data 위, 같은 sessionId(프로젝트 루트)로 격리. trace 와 동일 인프라
+    //   (코어 커플링 0, raw SQL 0). data 권한 미부여 환경이면 undefined → 매크로 비활성(기능 무해).
+    const macros: MacroSink | undefined = app.data
+      ? createMacroStore(app.data as DataApi, { sessionId: traceSessionId() })
+      : undefined;
+
+    const tower = setupTower(app, t("towerTitle", lang), () => lang, towerPlanner, trace, macros);
+    ctx.subscriptions.push({ dispose: () => tower.dispose() });
+
+    // 활성 Clubhouse 상태 → 분배 옵션. 모드/참여자/진행자/이름을 라이브 상태에서 끌어온다(단일 진실).
+    //   참여자 0(또는 활성 뷰 0)이면 null — 호출자가 거부 사유 반환. planFor 는 위 towerPlanFor seam.
+    const distOptions = (): import("./tower/executor").DistRunOptions | null => {
+      const st = activeClubhouse;
+      if (!st) return null;
+      const parts = participants(st.roster);
+      if (!parts.length) return null;
+      const facilitatorId = parts.includes(st.facilitatorId) ? st.facilitatorId : parts[0];
+      return { mode: st.mode, participants: parts, facilitatorId, nameOf, planFor: towerPlanFor };
+    };
 
     // ── send(라이브 Clubhouse 에 사람 메시지 주입 — 노출 command 로만 E2E·자동화 구동) ──
     ctx.subscriptions.push(
@@ -208,6 +288,323 @@ export default {
             // streamed = 지금까지 받은 message 청크 누적 길이(thought 제외) — >0 이면 '출력 시작'.
             actives: [...st.actives].map((c) => ({ id: c.agentId, streamed: c.liveRaw.length })),
           };
+        },
+      }),
+    );
+
+    // ── tower.plan(타워 slow-path 헤드리스 구동 — 발화 E2E·자동화) ──
+    // 모호 NL → 도메인맵 라이브 주입 planning 턴 → 검증 → dry-run. 기본은 dry-run(실행 0): 검증된 step 배열만
+    //   반환. commit:true 면 dispatch — 비파괴는 바로, danger step 은 데스크톱 confirm 게이트(헤드리스에선
+    //   사람 클릭 없으면 GATE_REQUIRED 로 미실행 = 보안 불변식 유지). 노출 command 로 slow-path 전체를 자가검증.
+    ctx.subscriptions.push(
+      app.commands.register("tower.plan", {
+        description:
+          "Drive the control-tower slow-path headlessly: turn an ambiguous natural-language request into a validated 3-axis plan (command/dom/status) via a planning turn with the live domain map injected, then return a dry-run preview (no execution). Pass commit:true to dispatch the validated plan (safe steps run; destructive steps still require the desktop confirm gate). Use for utterance E2E and AI automation of the tower.",
+        triggers: { ko: "타워 계획 자연어 명령 변환 plan 슬로우패스 dry-run 컨트롤타워" },
+        params: {
+          text: { type: "string", required: true, description: "Natural-language request (e.g. \"close the left panel and show the terminal big\")." },
+          commit: { type: "boolean", description: "true = dispatch the validated plan after planning (destructive steps still gated). Omit/false = dry-run only (return steps, execute nothing)." },
+          plan: {
+            type: "array",
+            description:
+              "Deterministic E2E injection: a KNOWN plan (array of {axis, name, params|address}) to validate and dry-run instead of calling the live planning agent. Still validated (unknown command/address rejected) and still danger-gated on commit — no security bypass.",
+          },
+          render: {
+            type: "boolean",
+            description: "true = render the dry-run preview in the tower modal UI (opens it if closed) for visual snapshot verification. Requires plan injection.",
+          },
+          edit: {
+            type: "array",
+            description:
+              "M9 editable dry-run preview: an ordered list of edit ops applied to the injected plan BEFORE commit, each {op:\"delete\"|\"up\"|\"down\"|\"params\", index:N, params?:{...}}. The EDITED plan is re-validated via validatePlan (an edit introducing an unknown command/address is rejected) and is what commit dispatches — never the original. Requires plan injection.",
+          },
+          autoConfirm: {
+            type: "string",
+            description:
+              "M9 headless rollback verification only: \"deny\" auto-denies the desktop confirm for danger steps during this commit (deterministic — no human click). Auto-deny is the SAFE direction (destructive never runs); there is NO auto-accept (accepting destructive headlessly is forbidden). Use to drive a destructive batch whose danger step deterministically fails, triggering the limited rollback of the already-executed invertible steps.",
+          },
+          distribute: {
+            type: "boolean",
+            description:
+              "true = multi-agent distribution (M6): the active conversation mode decides how the plan is split — facil (the facilitator splits across domain peers via @mention), turn (sequential dependent-step chain, one round-robin), simul (each checked agent proposes an independent plan in parallel). Destructive confirms are serialized FIFO (one open at a time). Requires an active Clubhouse view with checked agents.",
+          },
+          untrusted: {
+            type: "array",
+            description:
+              "M10 untrusted-context safety: a list of untrusted text sources that fed this plan (each {source, text}) — embedded browser-view text, tool results, or inter-agent/@mention payloads. Page/tool/agent text is DATA, not a command. If any source (or a plan step) carries an injection signature (prompt-injection directive, homograph command name, pipe-to-interpreter, ANSI/zero-width obfuscation, encoded payload), the plan is REFUSED (SCANNER_FLAGGED, nothing executed) and the flags are fed back. If clean but untrusted content is present, the plan is TAINTED — every destructive/inject step is FORCED through the desktop confirm gate (no fast-path, never auto-executed). Benign text passes silently (false-positive 0).",
+          },
+        },
+        handler: async (p: any) => {
+          const text = String(p?.text ?? "").trim();
+          if (!text) return { ok: false, error: "text 필수" };
+          // M10 — untrusted 출처 정규화({source,text}[]). 주입 시 scanner+taint 가 plan 경로 전체에 흐른다.
+          const untrusted = normalizeUntrusted(p?.untrusted);
+          let inject = Array.isArray(p?.plan) ? (p.plan as any[]) : undefined;
+          // M9 — edit ops(삭제·reorder·params)를 주입 plan 에 적용한 뒤 *편집된* plan 으로 진행한다. 순수
+          //   editplan 연산 → 편집된 plan 은 아래 revalidateAndRun 이 다시 validatePlan(편집 검증 우회 0).
+          const edits = Array.isArray(p?.edit) ? (p.edit as any[]) : undefined;
+          if (edits && inject) {
+            let steps = inject as any[];
+            for (const e of edits) {
+              const idx = Number(e?.index);
+              if (!Number.isInteger(idx)) continue;
+              if (e?.op === "delete") steps = deleteStep(steps as any, idx) as any[];
+              else if (e?.op === "up") steps = moveStep(steps as any, idx, "up") as any[];
+              else if (e?.op === "down") steps = moveStep(steps as any, idx, "down") as any[];
+              else if (e?.op === "params" && e?.params && typeof e.params === "object")
+                steps = editParams(steps as any, idx, e.params as Record<string, unknown>) as any[];
+            }
+            inject = steps;
+          }
+          // M9 — autoConfirm:"deny" 면 commit 동안 danger confirm 자동 거부(헤드리스 rollback 검증). deny 만.
+          const autoDeny = p?.autoConfirm === "deny";
+          // render:true + 주입 plan → 모달 UI 에 dry-run preview 렌더(시각 E2E). 실행 0.
+          if (p?.render === true && inject) {
+            const r = await tower.previewInject(text, inject as any);
+            if (!r.ok) return { ok: false, code: r.code, message: r.message };
+            return { ok: true, dryRun: true, rendered: true, steps: r.steps };
+          }
+          // 인터럽트 협조 양보 — commit 도중 사람 참견(pendingHuman)이 들어오면 다음 step/plan 전에 멈춘다
+          //   (현재까지 실행 보존, 취소-폐기 아님). 활성 뷰 없으면 항상 false(헤드리스 단발).
+          const shouldYield = () => (activeClubhouse?.pendingHuman.length ?? 0) > 0;
+          // M9 — 편집된 plan(또는 주입 plan)을 revalidateAndRun 으로 재검증→dry-run. 편집이 미등록을 들여놓으면
+          //   여기서 거부(UNKNOWN_COMMAND/NOT_EXPOSED) — 편집이 검증을 우회하지 못함. commit 은 편집된 plan.
+          if (edits && inject) {
+            const traceMeta = { nl: text, mode: activeClubhouse?.mode ?? "solo" };
+            const res = await tower.revalidateAndRun(inject as any, { trace: traceMeta, untrusted });
+            if (!res.ok) return { ok: false, code: res.code, message: res.message, scan: (res as any).scan };
+            if (p?.commit !== true) return { ok: true, dryRun: true, edited: true, steps: res.steps };
+            const c = await res.commit({ shouldYield, autoDenyConfirm: autoDeny });
+            return { ok: c.ok, committed: true, edited: true, code: c.code, steps: res.steps, results: c.results, yielded: c.yielded, rollback: c.rollback };
+          }
+          // distribute:true → 다중 에이전트 분배(M6). 모드는 활성 뷰에서. 주입 plan 은 simul 단일경로라 무시.
+          if (p?.distribute === true) {
+            const opts = distOptions();
+            if (!opts) return { ok: false, error: "활성 Clubhouse 뷰/참여자 없음(분배는 라이브 모드·로스터 필요)" };
+            // trace 메타(M7) — commit 시 에이전트별 plan·step·outcome 이 app.data 에 영속된다. untrusted(M10) 전달.
+            const res = await tower.distributeAndRun(text, { ...opts, trace: { nl: text, mode: opts.mode }, untrusted });
+            if (!res.ok) return { ok: false, code: res.code, message: res.message };
+            if (p?.commit !== true) return { ok: true, dryRun: true, mode: res.mode, plans: res.plans };
+            const c = await res.commit({ shouldYield });
+            return { ok: c.ok, committed: true, mode: res.mode, plans: res.plans, yielded: c.yielded, perAgent: c.perAgent };
+          }
+          // trace 메타(M7) — commit/discard 시 plan·step·outcome 이 app.data 에 영속(이벤트-우선).
+          //   mode 는 활성 뷰의 대화 모드(없으면 "solo"). nl = 원문(투명). untrusted(M10) 전달.
+          const traceMeta = { nl: text, mode: activeClubhouse?.mode ?? "solo" };
+          const res = await tower.planAndRun(text, inject ? { injectPlan: inject, trace: traceMeta, untrusted } : { trace: traceMeta, untrusted });
+          // M10 — SCANNER_FLAGGED 거부면 scan 리포트(flags/bySource)도 투명 노출(되먹임·감사). 실행 0.
+          if (!res.ok) return { ok: false, code: res.code, message: res.message, scan: (res as any).scan };
+          // dry-run 결과 — 검증된 step(축/이름/주소/파라미터) 그대로 노출(투명). 아직 실행 0.
+          const steps = res.steps;
+          if (p?.commit !== true) return { ok: true, dryRun: true, steps };
+          const c = await res.commit({ shouldYield, autoDenyConfirm: autoDeny });
+          // rollback(M9) — destructive 묶음 중간 실패 시 한정 rollback 결과(restored/unrestorable)를 투명 노출.
+          return { ok: c.ok, committed: true, code: c.code, steps, results: c.results, yielded: c.yielded, rollback: c.rollback };
+        },
+      }),
+    );
+
+    // ── tower.reflect(타워 post-execution reflection 루프 — 디스패치→verify→재계획→escalate, M8) ──
+    // planAndRun(dry-run)과 달리 즉시 디스패치하는 자율 루프지만 매 step 은 동일 danger 게이트를 강제 경유한다.
+    //   라이브: 활성 Clubhouse 엔진 planner 로 plan 을 짜고 실패를 되먹여 재계획. plans 주입 시 결정적 E2E
+    //   (스크립트된 planner 우회 — 검증·게이트는 동일, 보안 우회 0). maxSteps/maxReplans 가드 + 상한 초과
+    //   escalate(무한루프 금지). 재계획·escalation 은 tower.trace 에 영속된다(감사). 노출 command 로 자가검증.
+    ctx.subscriptions.push(
+      app.commands.register("tower.reflect", {
+        description:
+          "Drive the control-tower post-execution reflection loop (M8): plan -> dispatch (each step still danger-gated) -> verify the outcome (a step that failed at runtime, or a goal-verify status.query showing the intended state was not reached) -> feed the failure back into a re-plan turn -> dispatch the corrected plan. Bounded by maxSteps (reject an over-large plan) and maxReplans (cap re-plan iterations); on cap-exceeded it ESCALATES to the human instead of looping forever, surfacing the last failure. Each iteration and the escalation are persisted to the session trace (tower.trace). Pass a scripted plans sequence for deterministic E2E (still validated and danger-gated — no security bypass).",
+        triggers: { ko: "타워 reflection 재계획 검증 루프 자율 escalate 가드 컨트롤타워" },
+        params: {
+          text: { type: "string", required: true, description: "Natural-language request to plan, dispatch, verify, and re-plan on failure." },
+          plans: {
+            type: "array",
+            description:
+              "Deterministic E2E injection: an ordered array of KNOWN plans (each a step array of {axis,name,params|address}). The reflection loop consumes them in order as if a planner returned them — exercising dispatch, verify, re-plan, escalation, and trace without a live LLM. Each plan is still validated (unknown command/address rejected) and danger-gated on every step.",
+          },
+          goalCheck: {
+            type: "object",
+            description:
+              "Optional post-execution goal-verify step (a status.query step {axis:'status',name:'status.query',params}). After a plan dispatches ok, this is queried and its result decides whether the intended state was reached. Use with failGoalCodes.",
+          },
+          failGoalCodes: {
+            type: "array",
+            description:
+              "Status codes that mean the goal was NOT reached: if any goalCheck status carries one of these codes, the loop treats the plan as a goal-verify failure and re-plans. Declarative goal-verify for headless E2E (e.g. [\"dirty\",\"busy\"]).",
+          },
+          maxReplans: { type: "number", description: "Cap on re-plan iterations (default 3). On cap-exceeded the loop escalates to the human instead of looping forever." },
+          maxSteps: { type: "number", description: "Max steps per plan (default 20). A plan exceeding this is rejected (not dispatched) and the loop re-plans with a smaller-plan correction (step-inflation guard)." },
+          untrusted: {
+            type: "array",
+            description:
+              "M10 untrusted-context safety (same as tower.plan): untrusted text sources that fed planning (each {source, text}) — browser-view text, tool results, inter-agent/@mention payloads. A re-plan whose scan is flagged is rejected and the flags are fed back (refused-not-executed); a clean plan derived under untrusted content is tainted so its destructive/inject steps are forced through the desktop confirm gate (this autonomous loop never auto-runs a tainted destructive).",
+          },
+        },
+        handler: async (p: any) => {
+          const text = String(p?.text ?? "").trim();
+          if (!text) return { ok: false, error: "text 필수" };
+          // 결정적 E2E — plans(스크립트 plan 시퀀스)가 있으면 그 순서대로 돌려주는 planner 를 구성(라이브 우회).
+          //   검증·게이트·verify·재계획·trace 는 모두 동일(보안 우회 0). 라이브 모드면 활성 엔진 planner 사용.
+          let plannerInject: import("./tower/executor").Planner | undefined;
+          if (Array.isArray(p?.plans)) {
+            const scripted: any[] = p.plans;
+            let i = 0;
+            plannerInject = async () => {
+              const cur = scripted[Math.min(i++, scripted.length - 1)];
+              return JSON.stringify(Array.isArray(cur) ? cur : []);
+            };
+          }
+          const goalCheck = p?.goalCheck && typeof p.goalCheck === "object" ? (p.goalCheck as import("./tower/plan").PlanStep) : undefined;
+          const failGoalCodes = Array.isArray(p?.failGoalCodes) ? (p.failGoalCodes as string[]) : undefined;
+          const maxReplans = Number.isFinite(p?.maxReplans) ? Math.max(0, Number(p.maxReplans)) : undefined;
+          const maxSteps = Number.isFinite(p?.maxSteps) ? Math.max(1, Number(p.maxSteps)) : undefined;
+          const untrusted = normalizeUntrusted(p?.untrusted); // M10 — untrusted 컨텍스트(scanner+taint).
+          // trace 메타(M7) — 각 반복(재계획)이 독립 plan 레코드로, escalation 은 마지막 plan outcome="escalated" 로.
+          const traceMeta = { nl: text, mode: activeClubhouse?.mode ?? "reflect" };
+          const res = await tower.reflectAndRun(text, {
+            planner: plannerInject,
+            goalCheck,
+            failGoalCodes,
+            maxReplans,
+            maxSteps,
+            trace: traceMeta,
+            untrusted,
+          });
+          // 투명 — outcome(succeeded/escalated/rejected)·각 반복(steps/verified/rejectCode/failure)·escalation 표면.
+          return {
+            ok: res.ok,
+            outcome: res.outcome,
+            iterations: res.iterations,
+            escalation: res.escalation,
+          };
+        },
+      }),
+    );
+
+    // ── tower.trace(타워 세션/trace 조회 — 영속된 plan·step·결과 이력, RULE 8 관찰 가능) ──
+    // 현재 세션(프로젝트)의 최근 plan 들을 createdAt 내림차순으로, plan 옵션이 있으면 그 plan 의 step 을
+    //   seq 오름차순(실행 순서)으로 돌려준다. 영속이라 window.reload 후에도 같은 키로 재조회된다. data 권한
+    //   미부여 환경이면 trace=undefined → DATA_UNAVAILABLE 로 정직하게 보고(영속 비활성). 읽기 전용(비파괴).
+    ctx.subscriptions.push(
+      app.commands.register("tower.trace", {
+        description:
+          "Query the control-tower session trace persisted via the host generic data store (app.data): recent plans (id, nl, mode, agent, createdAt, outcome) in most-recent-first order, and, when a planId is given, that plan's steps (axis, name, params/address, danger, status, outcome, ts) in execution order. Read-only observability of what the tower ran — survives reload. Use for audit, utterance-E2E verification, and AI automation.",
+        triggers: { ko: "타워 trace 이력 세션 plan step 결과 감사 조회 컨트롤타워" },
+        params: {
+          plan: { type: "string", description: "A planId from a recent plan: return that plan's steps in execution order instead of the plan list." },
+          limit: { type: "number", description: "Max number of recent plans to return (default 20). Ignored when plan is given." },
+        },
+        handler: async (p: any) => {
+          if (!trace) return { ok: false, code: "DATA_UNAVAILABLE", message: "data 영속이 비활성(app.data 미제공)" };
+          const planId = typeof p?.plan === "string" && p.plan ? p.plan : undefined;
+          if (planId) {
+            const steps: TraceStep[] = await trace.stepsOf(planId);
+            return { ok: true, planId, steps };
+          }
+          const limit = Math.max(1, Math.min(200, Number(p?.limit) || 20));
+          const plans: TracePlan[] = await trace.recentPlans({ limit });
+          // session = sink 의 실제 키(쓰기·조회 동일) — 활성 후 프로젝트가 바뀌어도 이 sink 의 키는 고정.
+          return { ok: true, session: trace.sessionId, plans };
+        },
+      }),
+    );
+
+    // ── tower.scan(incoming-plan 콘텐츠 스캐너 — M10 untrusted 콘텐츠 안전 자가검증, 실행 0, RULE 4) ──
+    // untrusted 텍스트(browser-view·tool result·@멘션)와 plan step 을 라이브 도메인맵 기준으로 검사해
+    //   주입 시그니처(prompt-injection·homograph·pipe-to-interpreter·ANSI/zero-width·encoded)를 flag 한다.
+    //   순수 판정만 — 어떤 step 도 실행하지 않는다. benign 텍스트는 clean(false-positive 0). 노출 command 로
+    //   "공격 텍스트→flagged / 정상 텍스트→clean" 을 헤드리스 자가검증한다(E2E·AI 자동화).
+    ctx.subscriptions.push(
+      app.commands.register("tower.scan", {
+        description:
+          "Scan untrusted content for injection signatures (M10): pass untrusted text sources (each {source, text} — browser-view text, tool results, inter-agent/@mention payloads) and/or plan steps, and get back a structured ScanReport (flags [{kind, evidence, span}], bySource, verdict 'clean'|'flagged'). Detects prompt-injection directives, homograph/confusable command names, pipe-to-interpreter (curl|sh), ANSI/control-char and zero-width obfuscation, and encoded payloads. Pure verdict — executes nothing. Page/tool/agent text is data, not a command. Benign text is clean (false-positive 0). Use to self-verify the untrusted-content gate headlessly.",
+        triggers: { ko: "타워 스캔 주입 콘텐츠 비신뢰 검사 인젝션 컨트롤타워" },
+        params: {
+          untrusted: {
+            type: "array",
+            description: "Untrusted text sources, each {source, text}. The scanner treats this as DATA and looks for injection signatures.",
+          },
+          steps: {
+            type: "array",
+            description: "Optional plan steps (each {axis, name, params|address}) to scan for signatures embedded in the step itself (e.g. a pipe-to-interpreter in a term.exec param, a homograph command name).",
+          },
+        },
+        handler: async (p: any) => {
+          const untrusted = normalizeUntrusted(p?.untrusted);
+          const steps = Array.isArray(p?.steps) ? (p.steps as PlanStep[]) : undefined;
+          const report = await tower.scan({ untrusted, steps });
+          return { ok: true, verdict: report.verdict, flags: report.flags, bySource: report.bySource };
+        },
+      }),
+    );
+
+    // ── tower.macro(매크로 승격 — 반복 NL→plan 을 명명 fast-path 로, M11) ──
+    // "학습 = 명명 callable". 단일 사전선언 command(verbs: save/run/list/forget + propose) — 코어 레지스트리에
+    //   매크로별 새 이름을 동적 등록할 수 없으므로(conformance: contributes.commands 가 모든 이름 사전선언 필수,
+    //   매크로 이름은 런타임 사용자-coined) 매크로는 app.data 에 영속되고 이 한 command + 모달 팔레트로 노출된다.
+    //   매크로는 타워 *안의* 명명 fast-path 엔트리지 새 코어 레지스트리 이름이 아니다(RULE 8 노출 + conformance 동시).
+    // ⚠️ 안전(RULE 0): run 은 저장된 step 을 라이브 도메인맵으로 재검증(사라진 command/주소 → MACRO_REFUSED,
+    //   stale-execute 0)하고 SAME dispatchPlan/gate 로 디스패치(destructive step 은 confirm 게이트 그대로 — 매크로
+    //   승격이 danger 우회 0). save 는 tainted/flagged(M10) 입력을 거부(promotable 봉인 — 무음 untrusted fast-path 0).
+    //   propose 는 trusted+clean 반복만 제안하지 절대 자동저장 0(human-approval).
+    ctx.subscriptions.push(
+      app.commands.register("tower.macro", {
+        description:
+          "Named macro promotion (M11): save a recurring tower plan as a named fast-path, then re-run it directly with zero planner calls. Verbs (verb param): \"save\" persists {name, trigger, steps[]} (a tainted/scanner-flagged plan from M10 is REFUSED — promotion never mints a silent fast-path for untrusted-derived steps); \"run\" re-validates the saved steps against the LIVE domain map (a step whose command/address no longer exists → MACRO_REFUSED, nothing dispatched — never stale-executed) then dispatches through the SAME danger gate (a destructive step STILL prompts the desktop confirm); \"list\" enumerates saved macros; \"forget\" deletes one by name; \"propose\" reports whether a trusted+clean plan has recurred >= threshold times in the session trace (a proposal only — it never auto-saves; human approval saves via verb:save). Macros persist via the host generic data store (app.data) and survive reload. A macro is a named fast-path entry inside the tower, not a freshly-minted core registry command name.",
+        triggers: { ko: "타워 매크로 저장 실행 목록 삭제 승격 명명 fast-path 학습 컨트롤타워" },
+        params: {
+          verb: { type: "string", required: true, description: "save | run | list | forget | propose." },
+          name: { type: "string", description: "Macro name (user-coined). Required for save/run/forget." },
+          trigger: { type: "string", description: "Original natural-language trigger to store (save). Defaults to name when omitted." },
+          steps: {
+            type: "array",
+            description: "Validated plan steps (each {axis, name, params|address}) to store as the macro body (save). Typically the steps from a tower.plan dry-run that the user approved.",
+          },
+          tainted: { type: "boolean", description: "M10 — pass true if the steps derived from untrusted content; save REFUSES it (promotable seal — no silent untrusted fast-path)." },
+          scanVerdict: { type: "string", description: "M10 — \"clean\"|\"flagged\"; a \"flagged\" plan is REFUSED on save." },
+          threshold: { type: "number", description: "Repeat-count threshold for propose (default 3). A trusted+clean plan signature recurring >= threshold times in the trace is proposed for promotion." },
+          autoConfirm: { type: "string", description: "run only, headless: \"deny\" auto-denies the desktop confirm for a destructive step (deterministic — proves the gate fires without a human click). No auto-accept (forbidden)." },
+        },
+        handler: async (p: any) => {
+          const verb = String(p?.verb ?? "").trim();
+          if (!verb) return { ok: false, error: "verb 필수(save|run|list|forget|propose)" };
+          if (verb === "list") {
+            const macros: Macro[] = await tower.listMacros();
+            return { ok: true, macros };
+          }
+          if (verb === "propose") {
+            const threshold = Number.isFinite(p?.threshold) ? Math.max(2, Number(p.threshold)) : undefined;
+            const prop = await tower.proposeMacro(threshold);
+            return { ok: true, ...prop };
+          }
+          if (verb === "save") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "save 엔 name 필수" };
+            const steps = Array.isArray(p?.steps) ? (p.steps as PlanStep[]) : undefined;
+            if (!steps || !steps.length) return { ok: false, error: "save 엔 steps(비어 있지 않은 배열) 필수" };
+            const trigger = typeof p?.trigger === "string" && p.trigger ? p.trigger : name;
+            const scanVerdict = p?.scanVerdict === "flagged" || p?.scanVerdict === "clean" ? p.scanVerdict : undefined;
+            const saved = await tower.saveMacro({ name, trigger, steps, tainted: p?.tainted === true, scanVerdict });
+            // null = RULE 0 봉인 거부(tainted/flagged) 또는 영속 비활성(app.data 미제공).
+            if (!saved) return { ok: false, code: "MACRO_NOT_SAVED", message: "매크로 저장 거부(untrusted 유래이거나 영속 비활성)" };
+            return { ok: true, saved };
+          }
+          if (verb === "run") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "run 엔 name 필수" };
+            const autoDeny = p?.autoConfirm === "deny";
+            const r = await tower.runMacro(name, { autoDenyConfirm: autoDeny });
+            // 투명 — stage(not-found/refused/dispatched)·결과를 그대로 노출(되먹임·감사).
+            if (r.stage === "not-found") return { ok: false, stage: r.stage, code: r.code, message: r.message };
+            if (r.stage === "refused") return { ok: false, stage: r.stage, code: r.code, message: r.message, refusal: r.refusal, macro: r.macro };
+            return { ok: r.ok, stage: r.stage, code: r.code, macro: r.macro, results: r.results, yielded: r.yielded, rollback: r.rollback };
+          }
+          if (verb === "forget") {
+            const name = String(p?.name ?? "").trim();
+            if (!name) return { ok: false, error: "forget 엔 name 필수" };
+            const forgot = await tower.forgetMacro(name);
+            return { ok: true, forgot, name };
+          }
+          return { ok: false, error: `알 수 없는 verb: ${verb}(save|run|list|forget|propose)` };
         },
       }),
     );
@@ -685,6 +1082,7 @@ export default {
       // 버블은 아직 안 만든다 — "응답 중…" 인디케이터를 첫 스트리밍 청크(또는 최종 텍스트)까지 유지.
       const cur: Current = { agentId: speaker, connId, sessionId, row, bubble: null, liveRaw: "" };
       st.actives.add(cur); // 동시=N개 병렬 등록(각자 connId 로 독립 스트리밍)
+      liveEmit({ kind: "start", who: nameOf(speaker), color: COLOR[speaker] }); // 타워 라이브칸 발화 시작
       const off = app.bus.on(`acp.update.${connId}`, (evt: any) => onStream(cur, evt));
       let r: any;
       try {
@@ -700,6 +1098,7 @@ export default {
       if (work) {
         (cur.bubble ?? (cur.bubble = row.toBubble())).textContent = work; // 인디케이터→버블(없었으면 생성)
         row.setEnd();
+        liveEmit({ kind: "end", who: nameOf(speaker), color: COLOR[speaker], text: work }); // 타워 라이브칸 종결(권위 텍스트)
         if (typeof r.reasoning === "string" && r.reasoning) row.setReasoning(r.reasoning); // 💭 배지
         return work;
       }
@@ -924,6 +1323,8 @@ export default {
         // 첫 청크에서 "응답 중…" 인디케이터 → 버블 생성(그 전까진 인디케이터 유지).
         if (!cur.bubble) cur.bubble = cur.row.toBubble();
         cur.bubble.textContent = (cur.bubble.textContent || "") + t;
+        // 타워 라이브칸 relay — 같은 증분을 stable 토픽으로(이벤트-우선). start 는 delta 가 lazy 생성.
+        liveEmit({ kind: "delta", who: nameOf(cur.agentId), color: COLOR[cur.agentId], text: t });
       }
     }
 
@@ -935,6 +1336,7 @@ export default {
       row.append(who, bubble(text));
       st.msgs.appendChild(row);
       scroll(st);
+      liveEmit({ kind: "user", who: t("whoMe", lang), text }); // 타워 라이브칸 relay — 사람 발화도 동시 반영
     }
 
     // 대기(wait) 중 사람 입력 — "대기 중" 배지로 미반영 표시(흐릿한 버블). 주입 시 clearQueued 로 제거.

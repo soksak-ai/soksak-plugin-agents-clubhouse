@@ -14,9 +14,12 @@
   "entry": "main.js",
   "permissions": [
     "ui",
+    "ui:titlebar",
     "commands",
+    "commands:inject",
     "programs",
-    "fs:read"
+    "fs:read",
+    "data"
   ],
   "dependencies": {
     "soksak-plugin-agents-acp": "^0.1.0"
@@ -118,6 +121,41 @@
           "en": "Converse (multi-agent, headless)",
           "ko": "다중 에이전트 1교환(턴테이킹, 헤드리스 E2E)"
         }
+      },
+      {
+        "name": "tower.plan",
+        "title": {
+          "en": "Tower Plan (slow-path, headless)",
+          "ko": "컨트롤 타워 계획(slow-path NL→3축 plan, dry-run/commit)"
+        }
+      },
+      {
+        "name": "tower.reflect",
+        "title": {
+          "en": "Tower Reflect (post-execution loop, headless)",
+          "ko": "컨트롤 타워 reflection(디스패치→검증→재계획→escalate, M8)"
+        }
+      },
+      {
+        "name": "tower.trace",
+        "title": {
+          "en": "Tower Trace (session plan/step history)",
+          "ko": "컨트롤 타워 trace(세션 plan·step·결과 이력 조회)"
+        }
+      },
+      {
+        "name": "tower.scan",
+        "title": {
+          "en": "Tower Scan (untrusted-content injection scanner, headless)",
+          "ko": "컨트롤 타워 스캔(비신뢰 콘텐츠 주입 시그니처 검사, M10)"
+        }
+      },
+      {
+        "name": "tower.macro",
+        "title": {
+          "en": "Tower Macro (named fast-path: save/run/list/forget/propose)",
+          "ko": "컨트롤 타워 매크로(명명 fast-path: 저장·실행·목록·삭제·승격제안, M11)"
+        }
       }
     ],
     "nodes": [
@@ -144,6 +182,10 @@
       {
         "id": "modal",
         "description": "참견 모달 버튼(지금 끊기/끝나면/취소)"
+      },
+      {
+        "id": "tower",
+        "description": "AI-명령 컨트롤 타워 모달(NL 입력바·예시행·명령 팔레트·검색·라이브칸·닫기·드래그 그립)"
       }
     ],
     "programs": [
